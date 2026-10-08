@@ -1,6 +1,7 @@
 use crate::texture::{Atlas, CIRCLE_UV, SOLID_UV};
 use crate::{HoveredPoint, MarkerShape, PlotPoint, PlotTransform};
 use egui::{Align2, Color32, FontId, Id, Mesh, Painter, Pos2, Rect, Shape, Stroke, Vec2};
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub(crate) enum Geometry {
@@ -29,6 +30,7 @@ pub(crate) struct RenderScratch {
     pub primitives: Vec<Primitive>,
     keys: Vec<u64>,
     temporary: Vec<u64>,
+    meshes: Vec<Arc<Mesh>>,
 }
 impl RenderScratch {
     fn sort(&mut self) {
@@ -82,15 +84,20 @@ impl PlotItemContext<'_> {
     pub fn reserve(&mut self, count: usize) {
         self.primitives.reserve(count);
     }
+    /// Resolved item color, including automatic palette selection.
     pub fn color(&self) -> Color32 {
         self.color
     }
+    /// World-to-screen transform used for this render pass.
     pub fn transform(&self) -> &PlotTransform {
         self.transform
     }
     fn push(&mut self, depth: f32, color: Color32, geometry: Geometry) {
         let color = if self.depth_cue {
-            color.gamma_multiply((1.3 - depth * 0.09).clamp(0.45, 1.0))
+            let factor = ((1.3 - depth * 0.09).clamp(0.45, 1.0) * 255.0).round() as u8;
+            let shaded = color.gamma_multiply_u8(factor);
+            // A depth cue dims RGB; it must not turn opaque surfaces transparent.
+            Color32::from_rgba_premultiplied(shaded.r(), shaded.g(), shaded.b(), color.a())
         } else {
             color
         };
@@ -128,6 +135,7 @@ impl PlotItemContext<'_> {
             });
         }
     }
+    /// Submit a marker. Radius is in logical pixels; index is returned when the sample is picked.
     pub fn point(
         &mut self,
         point: PlotPoint,
@@ -148,6 +156,7 @@ impl PlotItemContext<'_> {
         self.pick(pos, depth, point, index, radius);
         self.push(depth, color, Geometry::Point { pos, radius, shape });
     }
+    /// Submit a segment clipped to the camera and plot. Width is in logical pixels; index identifies its first sample.
     pub fn line(&mut self, a: PlotPoint, b: PlotPoint, width: f32, color: Color32, index: usize) {
         if !width.is_finite() || width <= 0.0 {
             return;
@@ -188,6 +197,9 @@ impl PlotItemContext<'_> {
         let Some((start, end)) = clip_segment(pa.0, pb.0, self.transform.rect.expand(width)) else {
             return;
         };
+        if start.distance_sq(end) < 1e-12 {
+            return;
+        }
         if let Some(pointer) = self.pointer.filter(|p| {
             self.hover
                 && Rect::from_two_pos(start, end)
@@ -197,9 +209,16 @@ impl PlotItemContext<'_> {
             let delta = end - start;
             let t = ((pointer - start).dot(delta) / delta.length_sq().max(1e-12)).clamp(0.0, 1.0);
             let pos = start + delta * t;
-            let original_delta = pb.0 - pa.0;
-            let s = ((pos - pa.0).dot(original_delta) / original_delta.length_sq().max(1e-12))
-                .clamp(0.0, 1.0);
+            // A dominant-axis ratio avoids overflowing dot products for distant
+            // endpoints. Clipping has already placed `pos` on the segment.
+            let dx = pb.0.x as f64 - pa.0.x as f64;
+            let dy = pb.0.y as f64 - pa.0.y as f64;
+            let s = if dx.abs() >= dy.abs() {
+                (pos.x as f64 - pa.0.x as f64) / dx
+            } else {
+                (pos.y as f64 - pa.0.y as f64) / dy
+            }
+            .clamp(0.0, 1.0) as f32;
             let depth = if self.transform.camera.projection == crate::Projection::Perspective {
                 1.0 / ((1.0 - s) / pa.1 + s / pb.1)
             } else {
@@ -210,7 +229,7 @@ impl PlotItemContext<'_> {
             }
         }
         self.push(
-            (pa.1 + pb.1) * 0.5,
+            pa.1 * 0.5 + pb.1 * 0.5,
             color,
             Geometry::Line {
                 a: start,
@@ -219,6 +238,7 @@ impl PlotItemContext<'_> {
             },
         );
     }
+    /// Submit a shaft and screen-sized arrowhead. Width and head length are in logical pixels.
     pub fn arrow(
         &mut self,
         a: PlotPoint,
@@ -252,6 +272,67 @@ impl PlotItemContext<'_> {
             Geometry::Triangle([b.0, b.0 - d + n, b.0 - d - n]),
         );
     }
+    /// Submit indexed triangles, projecting each shared vertex once.
+    /// Invalid faces are skipped. Missing face colors use the resolved item color.
+    /// Optional directional shading preserves opacity. Triangles are not pickable.
+    pub fn indexed_triangles(
+        &mut self,
+        vertices: &[[f64; 3]],
+        indices: &[[u32; 3]],
+        colors: &[Color32],
+        shading: bool,
+    ) {
+        let projected: Vec<_> = vertices
+            .iter()
+            .map(|&p| self.transform.project(p.into()))
+            .collect();
+        self.reserve(indices.len());
+        for (face, &[a, b, c]) in indices.iter().enumerate() {
+            let [a, b, c] = [a as usize, b as usize, c as usize];
+            if a >= vertices.len()
+                || b >= vertices.len()
+                || c >= vertices.len()
+                || a == b
+                || b == c
+                || c == a
+            {
+                continue;
+            }
+            let points = [vertices[a], vertices[b], vertices[c]];
+            let mut color = colors.get(face).copied().unwrap_or(self.color);
+            if shading {
+                let u: [f64; 3] = std::array::from_fn(|i| points[1][i] - points[0][i]);
+                let v: [f64; 3] = std::array::from_fn(|i| points[2][i] - points[0][i]);
+                let n = [
+                    u[1] * v[2] - u[2] * v[1],
+                    u[2] * v[0] - u[0] * v[2],
+                    u[0] * v[1] - u[1] * v[0],
+                ];
+                let length = n[0].hypot(n[1]).hypot(n[2]);
+                if length.is_finite() && length > 0.0 {
+                    let light = ((n[0] * 0.36 - n[1] * 0.48 + n[2] * 0.8) / length).abs();
+                    let shaded = color.gamma_multiply((0.35 + 0.65 * light) as f32);
+                    color = Color32::from_rgba_premultiplied(
+                        shaded.r(),
+                        shaded.g(),
+                        shaded.b(),
+                        color.a(),
+                    );
+                }
+            }
+            if let [Some(a), Some(b), Some(c)] = [projected[a], projected[b], projected[c]] {
+                self.push(
+                    a.1 / 3.0 + b.1 / 3.0 + c.1 / 3.0,
+                    color,
+                    Geometry::Triangle([a.0, b.0, c.0]),
+                );
+            } else {
+                // Crossing the near plane still needs full triangle clipping.
+                self.triangle(points.map(Into::into), color);
+            }
+        }
+    }
+    /// Submit a filled world-space triangle, clipped at the near plane. Triangles currently do not participate in picking.
     pub fn triangle(&mut self, points: [PlotPoint; 3], color: Color32) {
         if points.iter().any(|p| !p.is_finite()) {
             return;
@@ -284,13 +365,14 @@ impl PlotItemContext<'_> {
                 [clipped[0], clipped[i], clipped[i + 1]].map(|v| self.transform.project_view(v));
             if let [Some(a), Some(b), Some(c)] = projected {
                 self.push(
-                    (a.1 + b.1 + c.1) / 3.0,
+                    a.1 / 3.0 + b.1 / 3.0 + c.1 / 3.0,
                     color,
                     Geometry::Triangle([a.0, b.0, c.0]),
                 );
             }
         }
     }
+    /// Submit centered plain text at a world-space point. Text currently does not participate in picking.
     pub fn text(&mut self, position: PlotPoint, text: String, color: Color32) {
         if let Some((pos, depth)) = self.transform.project(position)
             && self.transform.rect.contains(pos)
@@ -300,33 +382,54 @@ impl PlotItemContext<'_> {
     }
 }
 
-/// Liang-Barsky clipping avoids huge offscreen mesh coordinates when zoomed.
+/// Clip in f64 using the original line equation. Computing `a + t * (b - a)`
+/// in screen-space f32 loses the viewport entirely for distant endpoints.
 fn clip_segment(a: Pos2, b: Pos2, rect: Rect) -> Option<(Pos2, Pos2)> {
     if rect.contains(a) && rect.contains(b) {
         return Some((a, b));
     }
-    let d = b - a;
-    let (mut low, mut high) = (0.0_f32, 1.0_f32);
-    for (p, q) in [
-        (-d.x, a.x - rect.left()),
-        (d.x, rect.right() - a.x),
-        (-d.y, a.y - rect.top()),
-        (d.y, rect.bottom() - a.y),
-    ] {
-        if p.abs() < 1e-12 {
-            if q < 0.0 {
+    if !a.is_finite() || !b.is_finite() || !rect.is_finite() {
+        return None;
+    }
+    let mut a = [a.x as f64, a.y as f64];
+    let mut b = [b.x as f64, b.y as f64];
+    let dx = b[0] - a[0];
+    let dy = b[1] - a[1];
+    // Products of two f32 inputs are exact in f64, including large coordinates.
+    let c = b[0] * a[1] - b[1] * a[0];
+    let min = [rect.left() as f64, rect.top() as f64];
+    let max = [rect.right() as f64, rect.bottom() as f64];
+    for axis in 0..2 {
+        for (bound, below) in [(min[axis], true), (max[axis], false)] {
+            let outside = |p: [f64; 2]| {
+                if below {
+                    p[axis] < bound
+                } else {
+                    p[axis] > bound
+                }
+            };
+            let (out_a, out_b) = (outside(a), outside(b));
+            if out_a && out_b {
                 return None;
             }
-        } else {
-            let t = q / p;
-            if p < 0.0 {
-                low = low.max(t);
-            } else {
-                high = high.min(t);
+            if out_a || out_b {
+                let crossing = if axis == 0 {
+                    [bound, (dy * bound + c) / dx]
+                } else {
+                    [(dx * bound - c) / dy, bound]
+                };
+                if out_a {
+                    a = crossing;
+                } else {
+                    b = crossing;
+                }
             }
         }
     }
-    (low <= high).then_some((a + d * low, a + d * high))
+    Some((
+        Pos2::new(a[0] as f32, a[1] as f32),
+        Pos2::new(b[0] as f32, b[1] as f32),
+    ))
 }
 
 pub(crate) fn paint(painter: &Painter, scratch: &mut RenderScratch) -> usize {
@@ -337,7 +440,8 @@ pub(crate) fn paint(painter: &Painter, scratch: &mut RenderScratch) -> usize {
 fn paint_sorted(painter: &Painter, scratch: &mut RenderScratch) -> usize {
     let count = scratch.primitives.len();
     let mut atlas = Atlas::load(painter.ctx());
-    let mut mesh = Mesh::with_texture(atlas.texture.id());
+    let mut previous_meshes = std::mem::take(&mut scratch.meshes);
+    let mut mesh = reuse_mesh(&mut previous_meshes, atlas.texture.id());
     let (vertices, indices) = scratch.primitives.iter().fold((0, 0), |(v, i), p| {
         let (dv, di) = match p.geometry {
             Geometry::Point {
@@ -381,10 +485,14 @@ fn paint_sorted(painter: &Painter, scratch: &mut RenderScratch) -> usize {
             Geometry::Triangle(v) => triangle_mesh(&mut mesh, *v, p.color),
             Geometry::Text(pos, text) => {
                 if !mesh.is_empty() {
-                    painter.add(Shape::mesh(std::mem::replace(
-                        &mut mesh,
-                        Mesh::with_texture(atlas.texture.id()),
-                    )));
+                    submit_mesh(
+                        painter,
+                        std::mem::replace(
+                            &mut mesh,
+                            reuse_mesh(&mut previous_meshes, atlas.texture.id()),
+                        ),
+                        &mut scratch.meshes,
+                    );
                 }
                 painter.text(
                     *pos,
@@ -397,11 +505,29 @@ fn paint_sorted(painter: &Painter, scratch: &mut RenderScratch) -> usize {
         }
     }
     if !mesh.is_empty() {
-        painter.add(Shape::mesh(mesh));
+        submit_mesh(painter, mesh, &mut scratch.meshes);
     }
     scratch.primitives.clear();
     atlas.store(painter.ctx());
     count
+}
+
+fn reuse_mesh(pool: &mut Vec<Arc<Mesh>>, texture: egui::TextureId) -> Mesh {
+    // Most integrations consume last frame's shapes before building the next.
+    // Reclaim its allocation only when uniquely owned; retained FullOutputs stay immutable.
+    let mut mesh = pool
+        .pop()
+        .and_then(|m| Arc::try_unwrap(m).ok())
+        .unwrap_or_default();
+    mesh.vertices.clear();
+    mesh.indices.clear();
+    mesh.texture_id = texture;
+    mesh
+}
+fn submit_mesh(painter: &Painter, mesh: Mesh, keep: &mut Vec<Arc<Mesh>>) {
+    let mesh = Arc::new(mesh);
+    painter.add(Shape::Mesh(mesh.clone()));
+    keep.push(mesh);
 }
 
 fn vertex(mesh: &mut Mesh, pos: Pos2, color: Color32) {
@@ -682,6 +808,176 @@ fn format_number(v: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn clipping_retains_viewport_with_extremely_distant_endpoints() {
+        let rect = Rect::from_min_max(Pos2::ZERO, Pos2::new(500.0, 500.0));
+        for distance in [1e6, 1e10, f32::MAX] {
+            for (a, b, expected) in [
+                (
+                    Pos2::new(-distance, 250.0),
+                    Pos2::new(distance, 250.0),
+                    (Pos2::new(0.0, 250.0), Pos2::new(500.0, 250.0)),
+                ),
+                (
+                    Pos2::new(-distance, -distance),
+                    Pos2::new(distance, distance),
+                    (Pos2::ZERO, Pos2::new(500.0, 500.0)),
+                ),
+                (
+                    Pos2::new(250.0, -distance),
+                    Pos2::new(250.0, distance),
+                    (Pos2::new(250.0, 0.0), Pos2::new(250.0, 500.0)),
+                ),
+            ] {
+                assert_eq!(clip_segment(a, b, rect), Some(expected));
+                assert_eq!(clip_segment(b, a, rect), Some((expected.1, expected.0)));
+            }
+        }
+        assert!(clip_segment(Pos2::new(-10.0, 0.0), Pos2::new(-1.0, 500.0), rect).is_none());
+    }
+    #[test]
+    fn mesh_reuse_keeps_retained_outputs_immutable() {
+        let mut mesh = Mesh::default();
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: Pos2::new(12.0, 34.0),
+            uv: Pos2::ZERO,
+            color: Color32::WHITE,
+        });
+        let original = Arc::new(mesh);
+        let saved = original.clone();
+        let mut pool = vec![original];
+        let reused = reuse_mesh(&mut pool, egui::TextureId::default());
+        assert!(reused.vertices.is_empty());
+        assert_eq!(saved.vertices[0].pos, Pos2::new(12.0, 34.0));
+        let pointer = saved.vertices.as_ptr();
+        let capacity = saved.vertices.capacity();
+        let mut pool = vec![saved];
+        let reclaimed = reuse_mesh(&mut pool, egui::TextureId::default());
+        assert!(reclaimed.vertices.is_empty());
+        assert_eq!(reclaimed.vertices.as_ptr(), pointer);
+        assert_eq!(reclaimed.vertices.capacity(), capacity);
+    }
+    #[test]
+    fn depth_cue_preserves_opacity() {
+        let t = PlotTransform::new(
+            Rect::from_min_size(Pos2::ZERO, Vec2::splat(500.0)),
+            crate::PlotBounds::from_min_max([-1.0; 3], [1.0; 3]),
+            crate::Camera::default(),
+            true,
+        );
+        for color in [
+            Color32::WHITE,
+            Color32::from_rgba_unmultiplied(120, 180, 240, 80),
+        ] {
+            let mut primitives = Vec::new();
+            let mut hovered = None;
+            let mut context = PlotItemContext {
+                transform: &t,
+                primitives: &mut primitives,
+                pointer: None,
+                hovered: &mut hovered,
+                item_id: Id::new("opacity"),
+                name: "data",
+                color,
+                hover: false,
+                depth_cue: true,
+            };
+            context.point([0.0; 3].into(), 3.0, MarkerShape::Circle, color, 0);
+            assert_eq!(primitives[0].color.a(), color.a());
+            assert!(primitives[0].color.r() < color.r());
+        }
+    }
+    #[test]
+    #[ignore = "diagnostic benchmark: run with --release --ignored --nocapture"]
+    fn profile_million_sample_stages() {
+        use std::time::Instant;
+        let points: Vec<_> = (0..1_000_000)
+            .map(|i| {
+                let t = i as f64 * 0.013;
+                [t.sin(), (t * 1.618).cos(), (t * 0.37).sin()]
+            })
+            .collect();
+        println!("primitive bytes: {}", std::mem::size_of::<Primitive>());
+        for lines in [false, true] {
+            let context = egui::Context::default();
+            let mut scratch = RenderScratch::default();
+            let mut totals = [0.0; 4];
+            for frame in 0..30 {
+                let mut timings = [0.0; 4];
+                let mut output = context.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(
+                            Pos2::ZERO,
+                            Vec2::new(1000.0, 800.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        let t = PlotTransform::new(
+                            ui.max_rect(),
+                            crate::PlotBounds::from_min_max([-1.0; 3], [1.0; 3]),
+                            crate::Camera {
+                                yaw: frame as f32 * 0.01,
+                                ..Default::default()
+                            },
+                            true,
+                        );
+                        let started = Instant::now();
+                        let mut hovered = None;
+                        let mut ctx = PlotItemContext {
+                            transform: &t,
+                            primitives: &mut scratch.primitives,
+                            pointer: None,
+                            hovered: &mut hovered,
+                            item_id: Id::new("profile"),
+                            name: "data",
+                            color: Color32::LIGHT_BLUE,
+                            hover: false,
+                            depth_cue: true,
+                        };
+                        ctx.reserve(points.len());
+                        if lines {
+                            ctx.polyline(&points, 1.5, Color32::LIGHT_BLUE);
+                        } else {
+                            for (i, &p) in points.iter().enumerate() {
+                                ctx.point(
+                                    p.into(),
+                                    3.0,
+                                    MarkerShape::Circle,
+                                    Color32::LIGHT_BLUE,
+                                    i,
+                                );
+                            }
+                        }
+                        timings[0] = started.elapsed().as_secs_f64();
+                        let started = Instant::now();
+                        scratch.sort();
+                        timings[1] = started.elapsed().as_secs_f64();
+                        let started = Instant::now();
+                        paint_sorted(ui.painter(), &mut scratch);
+                        timings[2] = started.elapsed().as_secs_f64();
+                    },
+                );
+                output.textures_delta.clear();
+                let started = Instant::now();
+                std::hint::black_box(context.tessellate(output.shapes, output.pixels_per_point));
+                timings[3] = started.elapsed().as_secs_f64();
+                if frame >= 10 {
+                    for i in 0..4 {
+                        totals[i] += timings[i] * 50.0;
+                    }
+                }
+            }
+            println!(
+                "{} mean ms: projection {:.2}, sort {:.2}, mesh {:.2}, tessellation {:.2}",
+                if lines { "lines" } else { "points" },
+                totals[0],
+                totals[1],
+                totals[2],
+                totals[3]
+            );
+        }
+    }
     #[test]
     fn depth_keys_match_stable_numeric_order() {
         for count in [0, 1, 1023, 1024, 100_000] {

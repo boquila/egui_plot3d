@@ -3,17 +3,23 @@ use std::sync::Arc;
 /// A point in a right-handed coordinate system (Z up).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PlotPoint {
+    /// World X coordinate.
     pub x: f64,
+    /// World Y coordinate.
     pub y: f64,
+    /// World Z coordinate.
     pub z: f64,
 }
 impl PlotPoint {
+    /// Construct a world-space position from three coordinates.
     pub const fn new(x: f64, y: f64, z: f64) -> Self {
         Self { x, y, z }
     }
+    /// Return coordinates in X, Y, Z order.
     pub fn to_array(self) -> [f64; 3] {
         [self.x, self.y, self.z]
     }
+    /// Whether all three coordinates are finite.
     pub fn is_finite(self) -> bool {
         self.to_array().iter().all(|v| v.is_finite())
     }
@@ -46,24 +52,30 @@ impl Default for PlotBounds {
     }
 }
 impl PlotBounds {
+    /// Empty bounds; extend them with finite samples before use.
     pub const NOTHING: Self = Self {
         min: [f64::INFINITY; 3],
         max: [f64::NEG_INFINITY; 3],
     };
+    /// Construct bounds without reordering endpoints. Use [`Self::is_valid`] to check them.
     pub const fn from_min_max(min: [f64; 3], max: [f64; 3]) -> Self {
         Self { min, max }
     }
+    /// Lower bounds in X, Y, Z order.
     pub fn min(&self) -> [f64; 3] {
         self.min
     }
+    /// Upper bounds in X, Y, Z order.
     pub fn max(&self) -> [f64; 3] {
         self.max
     }
+    /// Whether all bounds are finite and each minimum is no greater than its maximum. Zero extents are valid.
     pub fn is_valid(&self) -> bool {
         (0..3).all(|i| {
             self.min[i].is_finite() && self.max[i].is_finite() && self.min[i] <= self.max[i]
         })
     }
+    /// Include a point if all its coordinates are finite.
     pub fn extend_with(&mut self, p: impl Into<PlotPoint>) {
         let p = p.into();
         if p.is_finite() {
@@ -73,18 +85,22 @@ impl PlotBounds {
             }
         }
     }
+    /// Include another box; invalid boxes are ignored.
     pub fn merge(&mut self, other: Self) {
         if other.is_valid() {
             self.extend_with(other.min);
             self.extend_with(other.max);
         }
     }
+    /// Include a finite X coordinate, leaving the other axes unchanged.
     pub fn extend_with_x(&mut self, x: f64) {
         self.extend_axis(0, x);
     }
+    /// Include a finite Y coordinate, leaving the other axes unchanged.
     pub fn extend_with_y(&mut self, y: f64) {
         self.extend_axis(1, y);
     }
+    /// Include a finite Z coordinate, leaving the other axes unchanged.
     pub fn extend_with_z(&mut self, z: f64) {
         self.extend_axis(2, z);
     }
@@ -106,6 +122,7 @@ impl PlotBounds {
             self.max[axis] = max;
         }
     }
+    /// Midpoint of each axis, computed without overflowing for finite valid bounds.
     pub fn center(&self) -> [f64; 3] {
         std::array::from_fn(|i| {
             let span = self.max[i] - self.min[i];
@@ -116,6 +133,7 @@ impl PlotBounds {
             }
         })
     }
+    /// Maximum minus minimum on each axis. Very large finite bounds may have infinite sizes.
     pub fn size(&self) -> [f64; 3] {
         std::array::from_fn(|i| self.max[i] - self.min[i])
     }
@@ -157,12 +175,13 @@ impl PlotBounds {
 }
 
 /// Immutable, cheaply cloned data with precomputed bounds. Build once for large static plots.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct PointBuffer {
     points: Arc<[[f64; 3]]>,
     bounds: PlotBounds,
 }
 impl PointBuffer {
+    /// Share immutable coordinates and calculate finite bounds once. Accepts a vector, boxed slice, or `Arc<[[f64; 3]]>`.
     pub fn new(points: impl Into<Arc<[[f64; 3]]>>) -> Self {
         let points = points.into();
         let mut bounds = PlotBounds::NOTHING;
@@ -171,15 +190,19 @@ impl PointBuffer {
         }
         Self { points, bounds }
     }
+    /// Borrow the original coordinates without copying.
     pub fn as_slice(&self) -> &[[f64; 3]] {
         &self.points
     }
+    /// Cached bounds of finite samples; empty/all-invalid data returns [`PlotBounds::NOTHING`].
     pub fn bounds(&self) -> PlotBounds {
         self.bounds
     }
+    /// Number of samples, including non-finite samples.
     pub fn len(&self) -> usize {
         self.points.len()
     }
+    /// Whether there are no samples.
     pub fn is_empty(&self) -> bool {
         self.points.is_empty()
     }
@@ -189,12 +212,30 @@ impl From<Vec<[f64; 3]>> for PointBuffer {
         Self::new(p)
     }
 }
+impl FromIterator<[f64; 3]> for PointBuffer {
+    fn from_iter<T: IntoIterator<Item = [f64; 3]>>(iter: T) -> Self {
+        Self::new(iter.into_iter().collect::<Vec<_>>())
+    }
+}
+impl From<Arc<[[f64; 3]]>> for PointBuffer {
+    fn from(points: Arc<[[f64; 3]]>) -> Self {
+        Self::new(points)
+    }
+}
+impl AsRef<[[f64; 3]]> for PointBuffer {
+    fn as_ref(&self) -> &[[f64; 3]] {
+        self.as_slice()
+    }
+}
 
 /// Borrowed, owned, or shared coordinates. Borrowing never copies the data.
 #[derive(Clone, Debug)]
 pub enum PlotPoints<'a> {
+    /// Borrowed array coordinates without copying.
     Borrowed(&'a [[f64; 3]]),
+    /// Owned coordinates.
     Owned(Vec<[f64; 3]>),
+    /// Shared immutable coordinates with cached bounds.
     Shared(PointBuffer),
 }
 impl Default for PlotPoints<'_> {
@@ -203,9 +244,11 @@ impl Default for PlotPoints<'_> {
     }
 }
 impl<'a> PlotPoints<'a> {
+    /// Own a vector of coordinates.
     pub fn new(points: Vec<[f64; 3]>) -> Self {
         Self::Owned(points)
     }
+    /// Borrow the coordinates regardless of their storage type.
     pub fn as_slice(&self) -> &[[f64; 3]] {
         match self {
             Self::Borrowed(p) => p,
@@ -213,12 +256,15 @@ impl<'a> PlotPoints<'a> {
             Self::Shared(p) => p.as_slice(),
         }
     }
+    /// Number of samples, including non-finite samples.
     pub fn len(&self) -> usize {
         self.as_slice().len()
     }
+    /// Whether there are no samples.
     pub fn is_empty(&self) -> bool {
         self.as_slice().is_empty()
     }
+    /// Bounds of finite samples. Shared buffers use cached bounds; other variants scan the coordinates.
     pub fn bounds(&self) -> PlotBounds {
         if let Self::Shared(p) = self {
             return p.bounds();

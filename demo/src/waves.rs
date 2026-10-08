@@ -1,7 +1,8 @@
-use crate::science::{GREEN, Scene, Series, gradient, surface};
+use crate::science::{GREEN, Scene, Series, surface};
+use eframe::egui;
 use std::f64::consts::{PI, TAU};
 
-pub const DESCRIPTION: &str = "Two coherent sources emit radial waves. Their amplitudes add: orange peaks and blue troughs reinforce or cancel. Compare phase 0 with pi: along x = 0, equal distances give complete cancellation at pi. Wavelength sets fringe spacing. This illustrative model uses softened radial decay, not a fluid simulation. Coordinates and amplitude are in arbitrary units.";
+pub const DESCRIPTION: &str = "Two radial waves reinforce or cancel. Inferno shows amplitude from -2 to +2 in arbitrary units; opposite phases cancel along the centerline.";
 
 pub fn amplitude(x: f64, y: f64, p: [f64; 3], time: f64) -> f64 {
     let r1 = (x - p[2] * 0.5).hypot(y);
@@ -15,7 +16,7 @@ pub fn build(p: [f64; 3], time: f64) -> Scene {
         4.0,
         65,
         |x, y| amplitude(x, y, p, time),
-        |z| gradient(z * 0.3 + 0.5),
+        |z| crate::inferno::color(z * 0.25 + 0.5),
     );
     // Fixed vertical bounds keep the camera still during animation.
     mesh.bounds = egui_plot3d::PlotBounds::from_min_max([-4.0, -4.0, -2.0], [4.0, 4.0, 2.0]);
@@ -28,6 +29,28 @@ pub fn build(p: [f64; 3], time: f64) -> Scene {
         )],
         ..Default::default()
     }
+}
+
+pub fn color_scale(ui: &mut egui::Ui) {
+    ui.horizontal(|ui| {
+        ui.small("Amplitude  -2");
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(130.0, 10.0), egui::Sense::hover());
+        let mut mesh = egui::Mesh::default();
+        for i in 0..=64 {
+            let t = i as f64 / 64.0;
+            let x = egui::lerp(rect.x_range(), t as f32);
+            let color = crate::inferno::color(t);
+            mesh.colored_vertex(egui::pos2(x, rect.top()), color);
+            mesh.colored_vertex(egui::pos2(x, rect.bottom()), color);
+            if i > 0 {
+                let k = i * 2;
+                mesh.add_triangle(k - 2, k - 1, k);
+                mesh.add_triangle(k, k - 1, k + 1);
+            }
+        }
+        ui.painter().add(egui::Shape::mesh(mesh));
+        ui.small("+2  · Inferno");
+    });
 }
 
 /// Smooth parameter modulation makes fringes merge and separate as waves travel.

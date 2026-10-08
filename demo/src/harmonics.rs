@@ -1,7 +1,7 @@
 use crate::science::{BLUE, GREEN, ORANGE, Scene, Series};
 use std::f64::consts::TAU;
 
-pub const DESCRIPTION: &str = "Three sinusoidal coordinates form a 3D Lissajous curve. The base functions are x = sin(fx t + 0.4), y = sin(fy t), z = sin(fz t), with amplitude 1 in arbitrary units. Integer frequency ratios close the curve at t = 2 pi. Animate values changes the phases and amplitudes and blends in higher harmonics, making the whole curve morph while staying closed. The faint floor and side curves show coordinate projections.";
+pub const DESCRIPTION: &str = "Three sine waves form a closed 3D curve. Animate values changes its shape; faint curves show its XY and YZ projections.";
 
 pub fn position(t: f64, f: [f64; 3]) -> [f64; 3] {
     [(f[0] * t + 0.4).sin(), (f[1] * t).sin(), (f[2] * t).sin()]

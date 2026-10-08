@@ -23,6 +23,10 @@ egui = { version = "0.36.2", features = ["default_fonts"] }
 name = "render"
 harness = false
 
+[[bench]]
+name = "workloads"
+harness = false
+
 [profile.release]
 opt-level = 3
 lto = "thin"

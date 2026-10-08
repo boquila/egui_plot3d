@@ -4,9 +4,13 @@ mod cloud;
 mod dipole;
 mod gaussian;
 mod harmonics;
+mod inferno;
 mod kepler;
+mod knots;
 mod lorenz;
 mod science;
+mod spherical;
+mod spirals;
 mod waves;
 
 #[cfg(not(target_arch = "wasm32"))]

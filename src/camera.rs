@@ -2,19 +2,27 @@ use crate::{PlotBounds, PlotPoint};
 use egui::{Pos2, Rect, Vec2, pos2, vec2};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Camera projection model.
 pub enum Projection {
     #[default]
+    /// Distant geometry appears smaller (default).
     Perspective,
+    /// Parallel projection; distances do not change apparent size.
     Orthographic,
 }
 
 /// Orbit camera. Angles are radians, pan is in plot-size units, zoom is a multiplier.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Camera {
+    /// Orbit azimuth in radians.
     pub yaw: f32,
+    /// Orbit elevation in radians, clamped to -1.55..=1.55 when used.
     pub pitch: f32,
+    /// Zoom multiplier, clamped to 0.02..=100 when used.
     pub zoom: f32,
+    /// Screen displacement in fractions of the plot width and height.
     pub pan: Vec2,
+    /// Perspective or orthographic projection.
     pub projection: Projection,
 }
 impl Default for Camera {
@@ -29,10 +37,12 @@ impl Default for Camera {
     }
 }
 impl Camera {
+    /// Apply a primary-drag delta in logical pixels; yaw wraps and pitch stays away from the poles.
     pub fn orbit(&mut self, delta: Vec2) {
         self.yaw = (self.yaw - delta.x * 0.008).rem_euclid(std::f32::consts::TAU);
         self.pitch = (self.pitch + delta.y * 0.008).clamp(-1.55, 1.55);
     }
+    /// Multiply zoom by a positive finite factor, clamping the result to 0.02..=100.
     pub fn zoom_by(&mut self, factor: f32) {
         if factor.is_finite() && factor > 0.0 {
             self.zoom = (self.zoom * factor).clamp(0.02, 100.0);
@@ -74,6 +84,7 @@ pub struct PlotTransform {
     cp: f32,
 }
 impl PlotTransform {
+    /// Build a transform for a screen rectangle, fitted data bounds, and camera. Equal aspect preserves equal world units.
     pub fn new(rect: Rect, bounds: PlotBounds, camera: Camera, equal_aspect: bool) -> Self {
         let bounds = bounds.fitted();
         let camera = camera.sanitized();
@@ -100,6 +111,7 @@ impl PlotTransform {
             cp,
         }
     }
+    /// Screen rectangle allocated to the plot, in logical pixels.
     pub fn frame(&self) -> Rect {
         self.rect
     }
@@ -119,9 +131,11 @@ impl PlotTransform {
         self.extent = aspect.map(|v| radius / v);
         self
     }
+    /// Fitted world-space bounds used by this transform.
     pub fn bounds(&self) -> PlotBounds {
         self.bounds
     }
+    /// Sanitized camera used by this transform.
     pub fn camera(&self) -> Camera {
         self.camera
     }
@@ -165,9 +179,11 @@ impl PlotTransform {
     fn pixel_scale(&self) -> f32 {
         self.screen_scale
     }
+    /// Project a world point to logical screen pixels; returns `None` behind the near plane or for non-finite results.
     pub fn position_from_point(&self, point: impl Into<PlotPoint>) -> Option<Pos2> {
         self.project(point.into()).map(|p| p.0)
     }
+    /// Project a world point, returning logical screen pixels and camera-space depth.
     pub fn project(&self, point: PlotPoint) -> Option<(Pos2, f32)> {
         if !point.is_finite() {
             return None;
@@ -221,6 +237,7 @@ impl PlotTransform {
         }
         Some([self.project_view(a)?, self.project_view(b)?])
     }
+    /// Convert a logical pixel displacement to the normalized pan units used by [`Camera`].
     pub fn screen_delta_to_pan(&self, delta: Vec2) -> Vec2 {
         vec2(
             delta.x / self.rect.width().max(1.0),

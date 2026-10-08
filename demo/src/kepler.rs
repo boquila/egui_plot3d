@@ -1,7 +1,7 @@
 use crate::science::{BLUE, GREEN, ORANGE, Scene, Series};
 use std::f64::consts::{PI, TAU};
 
-pub const DESCRIPTION: &str = "An ideal two-body orbit with the star at a focus. The 24 green dots are equally spaced in time, so wider spacing near the star means greater speed. Animate the planet and compare an eccentric orbit with a circle. Inclination rotates the orbital plane into 3D. Semi-major axis = 3 arbitrary distance units; animation advances mean anomaly uniformly (one orbit in about 10.5 seconds).";
+pub const DESCRIPTION: &str = "An elliptical orbit with the star at a focus. Dots mark equal time intervals: wider gaps mean faster motion.";
 
 pub fn eccentric_anomaly(mean: f64, e: f64) -> f64 {
     let mean = (mean + PI).rem_euclid(TAU) - PI;

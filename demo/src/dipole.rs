@@ -1,7 +1,7 @@
 use crate::science::{BLUE, ORANGE, Scene, Series};
 use std::f64::consts::{PI, TAU};
 
-pub const DESCRIPTION: &str = "An ideal magnetic dipole points along the tilted axis. Field lines follow r = L sin(theta)^2; arrows show the local field direction and have constant length. The equatorial field opposes the dipole axis, while the polar field follows it. Field strength falls as 1/r^3, but is not encoded by arrow length. The singular core (r < 0.3) is omitted. Axis markers indicate orientation, not separate magnetic monopoles. Units are relative; the physical prefactor is omitted.";
+pub const DESCRIPTION: &str = "Ideal magnetic dipole field lines. Arrows show direction, not strength. Animation rotates the dipole and varies the sampled lines.";
 
 pub fn field(p: [f64; 3]) -> [f64; 3] {
     let r2 = p.iter().map(|v| v * v).sum::<f64>();

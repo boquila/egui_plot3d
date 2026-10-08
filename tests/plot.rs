@@ -550,3 +550,126 @@ fn background_visibility_last_setting_wins_and_keeps_color() {
         assert_eq!(present, visible);
     }
 }
+
+#[test]
+fn manual_and_auto_choices_override_defaults_until_reset() {
+    let ctx = Context::default();
+    let defaults = PlotBounds::from_min_max([-10.0; 3], [10.0; 3]);
+    let manual = PlotBounds::from_min_max([-2.0; 3], [2.0; 3]);
+    let draw = |ui: &mut egui::Ui, mode: u8| {
+        let plot = Plot::new("bounds priority")
+            .default_bounds(defaults)
+            .default_x_bounds(-10.0, 10.0)
+            .include_x(-5.0);
+        let plot = if mode == 3 { plot.reset() } else { plot };
+        plot.show(ui, |p| {
+            p.points(Points::new("data", [[0.0; 3], [1.0; 3]]));
+            if mode == 1 {
+                p.set_plot_bounds(manual);
+            }
+            if mode == 2 {
+                p.set_auto_bounds(true);
+            }
+        })
+    };
+    frame(&ctx, vec![], |ui| draw(ui, 1));
+    let (r, _) = frame(&ctx, vec![], |ui| draw(ui, 0));
+    assert_eq!(r.transform.bounds(), manual);
+    frame(&ctx, vec![], |ui| draw(ui, 2));
+    let (r, _) = frame(&ctx, vec![], |ui| draw(ui, 0));
+    assert_eq!(
+        r.transform.bounds(),
+        PlotBounds::from_min_max([-5.0, 0.0, 0.0], [1.0; 3])
+    );
+    let (r, _) = frame(&ctx, vec![], |ui| draw(ui, 3));
+    assert_eq!(r.transform.bounds(), defaults);
+}
+
+#[test]
+fn clipped_out_plots_skip_geometry_but_keep_build_and_bounds() {
+    let ctx = Context::default();
+    let (r, _) = frame(&ctx, vec![], |ui| {
+        ui.set_clip_rect(Rect::from_min_max(
+            Pos2::new(700.0, 500.0),
+            Pos2::new(800.0, 600.0),
+        ));
+        Plot::new("outside clip")
+            .width(200.0)
+            .height(200.0)
+            .show(ui, |p| {
+                p.points(Points::new("data", [[2.0; 3], [3.0; 3]]));
+            })
+    });
+    assert_eq!(r.rendered_primitives, 0);
+    assert_eq!(r.transform.bounds().min(), [2.0; 3]);
+    assert_eq!(r.transform.bounds().max(), [3.0; 3]);
+}
+
+#[test]
+fn unmatched_or_invalid_arrow_pairs_do_not_distort_fitting() {
+    let arrows = Arrows::new(
+        "pairs",
+        [[0.0; 3], [1e10; 3], [2e10; 3]],
+        [[1.0; 3], [f64::NAN; 3]],
+    );
+    assert_eq!(
+        arrows.bounds(),
+        PlotBounds::from_min_max([0.0; 3], [1.0; 3])
+    );
+}
+
+#[test]
+fn repeated_line_samples_do_not_create_invisible_pick_targets() {
+    let (response, _) = frame(&Context::default(), vec![], |ui| {
+        Plot::new("repeated samples").show(ui, |p| {
+            p.line(Line::new("stationary", [[0.0; 3]; 3]));
+        })
+    });
+    assert_eq!(response.rendered_primitives, 0);
+}
+
+#[test]
+fn indexed_surfaces_clip_skip_invalid_faces_and_preserve_opacity() {
+    let vertices = [
+        [-0.1, 0.0, 0.0],
+        [0.1, 0.0, 0.0],
+        [0.0, 5.0, 0.1],
+        [f64::NAN; 3],
+    ];
+    let indices = [[0, 1, 2], [0, 1, 99], [0, 3, 2], [0, 0, 1]];
+    let color = egui::Color32::from_rgba_unmultiplied(240, 180, 60, 200);
+    let colors = [color];
+    let (response, output) = frame(&Context::default(), vec![], |ui| {
+        Plot::new("surface clipping")
+            .camera(Camera {
+                yaw: 0.0,
+                pitch: 0.0,
+                ..Default::default()
+            })
+            .default_bounds(PlotBounds::from_min_max([-1.0; 3], [1.0; 3]))
+            .show_axes([false; 3])
+            .show_frame(false)
+            .show_grid(false)
+            .depth_cue(false)
+            .show(ui, |p| {
+                p.surface(
+                    Surface::new("mesh", vertices.as_slice(), indices.as_slice())
+                        .colors(&colors)
+                        .shading(true),
+                )
+            })
+    });
+    assert_eq!(response.rendered_primitives, 2);
+    let mut vertices = 0;
+    for shape in output.shapes {
+        if let egui::Shape::Mesh(mesh) = shape.shape {
+            assert!(mesh.is_valid());
+            for vertex in &mesh.vertices {
+                assert!(vertex.pos.is_finite());
+                assert_eq!(vertex.color.a(), color.a());
+                vertices += 1;
+            }
+        }
+    }
+    assert_eq!(vertices, 6);
+}

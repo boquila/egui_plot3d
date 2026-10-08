@@ -60,18 +60,21 @@ impl Cloud {
         self.selected = None;
     }
     pub fn controls(&mut self, ui: &mut egui::Ui) {
-        ui.label("Sample count");
         let mut changed = ui
-            .add(egui::Slider::new(&mut self.count, 100..=100_000).logarithmic(true))
+            .add(
+                egui::Slider::new(&mut self.count, 100..=100_000)
+                    .logarithmic(true)
+                    .text("Samples"),
+            )
             .changed();
-        ui.add_space(10.0);
-        ui.label("Cluster spread");
         changed |= ui
-            .add(egui::Slider::new(&mut self.spread, 0.15..=1.5))
+            .add(egui::Slider::new(&mut self.spread, 0.15..=1.5).text("Spread"))
             .changed();
-        ui.add_space(10.0);
-        ui.label("Point radius");
-        ui.add(egui::Slider::new(&mut self.radius, 0.8..=6.0).suffix(" px"));
+        ui.add(
+            egui::Slider::new(&mut self.radius, 0.8..=6.0)
+                .suffix(" px")
+                .text("Radius"),
+        );
         ui.add_space(8.0);
         ui.checkbox(&mut self.colored, "Color by cluster");
         if ui.button("Regenerate samples").clicked() {
@@ -81,16 +84,13 @@ impl Cloud {
         if changed {
             self.regenerate();
         }
-        ui.add_space(20.0);
-        ui.strong("Point inspector");
         if let Some((name, index, p)) = &self.selected {
+            ui.separator();
             ui.label(format!("{name} / {index}"));
             ui.monospace(format!("x  {:.4}\ny  {:.4}\nz  {:.4}", p[0], p[1], p[2]));
             if ui.small_button("Clear selection").clicked() {
                 self.selected = None;
             }
-        } else {
-            ui.label(egui::RichText::new("Click a point to inspect its coordinates.").weak());
         }
     }
     pub fn plot(&self, ui: &mut PlotUi<'_>) {

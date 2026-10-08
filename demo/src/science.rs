@@ -10,6 +10,15 @@ pub const ORANGE: Color32 = Color32::from_rgb(232, 145, 65);
 pub const GREEN: Color32 = Color32::from_rgb(80, 185, 140);
 pub type Triangle = ([[f64; 3]; 3], Color32);
 
+pub struct IndexedSurface {
+    pub name: &'static str,
+    pub vertices: PointBuffer,
+    pub indices: Arc<[[u32; 3]]>,
+    pub colors: Vec<Color32>,
+    pub shading: bool,
+    pub bounds: PlotBounds,
+}
+
 #[derive(Clone)]
 pub struct Surface {
     pub name: &'static str,
@@ -25,7 +34,7 @@ impl PlotItem for Surface {
         self.bounds
     }
     fn color(&self) -> Option<Color32> {
-        Some(BLUE)
+        self.triangles.first().map(|(_, color)| *color)
     }
     fn allow_hover(&self) -> bool {
         false
@@ -55,6 +64,7 @@ impl Series {
 #[derive(Default)]
 pub struct Scene {
     pub surface: Option<Surface>,
+    pub mesh: Option<IndexedSurface>,
     pub lines: Vec<Series>,
     pub dots: Vec<Series>,
     pub arrows: Option<(PointBuffer, PointBuffer)>,
@@ -68,9 +78,20 @@ impl Scene {
         for s in self.lines.iter().chain(&self.dots) {
             bounds.merge(s.data.bounds());
         }
+        if let Some(mesh) = &self.mesh {
+            bounds.merge(mesh.bounds);
+        }
         bounds
     }
-    pub fn plot(&self, ui: &mut PlotUi<'_>) {
+    pub fn plot<'a>(&'a self, ui: &mut PlotUi<'a>) {
+        if let Some(mesh) = &self.mesh {
+            ui.surface(
+                egui_plot3d::Surface::new(mesh.name, &mesh.vertices, mesh.indices.as_ref())
+                    .color(crate::inferno::color(0.65))
+                    .colors(&mesh.colors)
+                    .shading(mesh.shading),
+            );
+        }
         if let Some(surface) = &self.surface {
             ui.add(surface.clone());
         }
@@ -103,6 +124,35 @@ impl Scene {
         let mut shapes = Vec::new();
         let t = egui_plot3d::PlotTransform::new(rect, self.bounds(), camera, true)
             .with_axis_aspect(aspect);
+        if let Some(surface) = &self.mesh {
+            let projected: Vec<_> = surface
+                .vertices
+                .as_slice()
+                .iter()
+                .map(|&p| t.project(p.into()))
+                .collect();
+            let mut faces: Vec<_> = surface
+                .indices
+                .iter()
+                .enumerate()
+                .filter_map(|(i, indices)| {
+                    let [Some(a), Some(b), Some(c)] = indices.map(|i| projected[i as usize]) else {
+                        return None;
+                    };
+                    Some(([a.0, b.0, c.0], surface.colors[i], a.1 + b.1 + c.1))
+                })
+                .collect();
+            faces.sort_unstable_by(|a, b| b.2.total_cmp(&a.2));
+            let mut mesh = egui::Mesh::default();
+            for (points, color, _) in faces {
+                let base = mesh.vertices.len() as u32;
+                for p in points {
+                    mesh.colored_vertex(p, color);
+                }
+                mesh.add_triangle(base, base + 1, base + 2);
+            }
+            shapes.push(egui::Shape::mesh(mesh));
+        }
         if let Some(surface) = &self.surface {
             let mut triangles: Vec<_> = surface
                 .preview_triangles
@@ -161,43 +211,68 @@ pub struct Science {
     time: f64,
     pub scene: Scene,
     preview: Option<(egui::Rect, Vec<egui::Shape>)>,
+    reaction: Option<crate::spirals::Model>,
 }
 impl Science {
-    pub const TITLES: [&'static str; 5] = [
+    pub const TITLES: [&'static str; 8] = [
         "Wave interference",
         "Kepler orbits",
         "Correlated Gaussian",
         "Harmonic motion",
         "Magnetic dipole",
+        "Spherical harmonics",
+        "Spiral waves",
+        "Torus knots",
     ];
-    pub const NAMES: [&'static str; 5] = ["waves", "kepler", "gaussian", "harmonics", "dipole"];
-    pub const TAGS: [&'static [&'static str]; 5] = [
+    pub const NAMES: [&'static str; 8] = [
+        "waves",
+        "kepler",
+        "gaussian",
+        "harmonics",
+        "dipole",
+        "spherical",
+        "spirals",
+        "knots",
+    ];
+    pub const TAGS: [&'static [&'static str]; 8] = [
         &["surface", "waves"],
         &["orbit", "astronomy"],
         &["surface", "statistics"],
         &["lines", "frequencies"],
         &["vectors", "magnetism"],
+        &["surface", "modes"],
+        &["surface", "excitable media"],
+        &["surface", "topology"],
     ];
-    pub const SOURCES: [&'static str; 5] = [
+    pub const SOURCES: [&'static str; 8] = [
         include_str!("waves.rs"),
         include_str!("kepler.rs"),
         include_str!("gaussian.rs"),
         include_str!("harmonics.rs"),
         include_str!("dipole.rs"),
+        include_str!("spherical.rs"),
+        include_str!("spirals.rs"),
+        include_str!("knots.rs"),
     ];
-    pub const DESCRIPTIONS: [&'static str; 5] = [
+    pub const DESCRIPTIONS: [&'static str; 8] = [
         crate::waves::DESCRIPTION,
         crate::kepler::DESCRIPTION,
         crate::gaussian::DESCRIPTION,
         crate::harmonics::DESCRIPTION,
         crate::dipole::DESCRIPTION,
+        crate::spherical::DESCRIPTION,
+        crate::spirals::DESCRIPTION,
+        crate::knots::DESCRIPTION,
     ];
-    pub const REFERENCES: [&'static str; 5] = [
+    pub const REFERENCES: [&'static str; 8] = [
         "https://openstax.org/books/university-physics-volume-1/pages/16-5-interference-of-waves",
         "https://science.nasa.gov/solar-system/orbits-and-keplers-laws/",
         "https://mathworld.wolfram.com/BivariateNormalDistribution.html",
         "https://mathworld.wolfram.com/LissajousCurve.html",
         "https://farside.ph.utexas.edu/teaching/jk1/Electromagnetism/node52.html",
+        "https://dlmf.nist.gov/14.30",
+        "https://www.scholarpedia.org/article/Barkley_model",
+        "https://mathworld.wolfram.com/TorusKnot.html",
     ];
     fn defaults(kind: usize) -> [f64; 3] {
         match kind {
@@ -205,7 +280,10 @@ impl Science {
             1 => [0.65, 30.0, 0.0],
             2 => [0.65, 1.0, 0.0],
             3 => [2.0, 3.0, 5.0],
-            _ => [20.0, 8.0, 0.0],
+            4 => [20.0, 8.0, 0.0],
+            5 => [4.0, 3.0, 0.85],
+            6 => [0.75, 0.02, 0.02],
+            _ => [2.0, 3.0, 0.20],
         }
     }
     pub fn new(kind: usize) -> Self {
@@ -213,33 +291,37 @@ impl Science {
             kind,
             params: Self::defaults(kind),
             animate: false,
-            animate_values: false,
+            animate_values: matches!(kind, 0 | 3..=7),
             value_time: 0.0,
             motion_speed: 1.0,
             motion_strength: 1.0,
             time: 0.0,
             scene: Scene::default(),
             preview: None,
+            reaction: None,
         };
         s.rebuild();
         s
     }
     pub fn aspect(&self) -> [f64; 3] {
-        if self.kind == 2 {
-            [1.0, 1.0, 8.0]
-        } else {
-            [1.0; 3]
+        match self.kind {
+            2 => [1.0, 1.0, 8.0],
+            6 => [1.0, 1.0, 2.4],
+            _ => [1.0; 3],
         }
     }
     pub fn camera(kind: usize) -> egui_plot3d::Camera {
         egui_plot3d::Camera {
-            pitch: if kind == 1 {
+            pitch: if kind == 7 {
+                0.9
+            } else if kind == 1 {
                 1.25
-            } else if kind == 0 || kind == 2 {
+            } else if matches!(kind, 0 | 2 | 6) {
                 0.75
             } else {
                 0.45
             },
+            zoom: if matches!(kind, 5 | 7) { 1.15 } else { 1.0 },
             ..Default::default()
         }
     }
@@ -257,6 +339,7 @@ impl Science {
         match self.kind {
             0 => ["x", "y", "amplitude"],
             2 => ["x", "y", "density"],
+            6 => ["x", "y", "activation"],
             _ => ["x", "y", "z"],
         }
     }
@@ -269,7 +352,7 @@ impl Science {
             ],
             1 => [
                 ("Eccentricity", 0.0..=0.85),
-                ("Inclination (degrees)", 0.0..=75.0),
+                ("Inclination (°)", 0.0..=75.0),
                 ("Mean anomaly / pi", 0.0..=2.0),
             ],
             2 => [
@@ -282,10 +365,25 @@ impl Science {
                 ("Y frequency", 1.0..=8.0),
                 ("Z frequency", 1.0..=8.0),
             ],
-            _ => [
-                ("Tilt (degrees)", 0.0..=90.0),
+            4 => [
+                ("Tilt (°)", 0.0..=90.0),
                 ("Meridian planes", 3.0..=12.0),
                 ("Unused", 0.0..=1.0),
+            ],
+            5 => [
+                ("Degree l", 1.0..=7.0),
+                ("Order m", 0.0..=self.params[0]),
+                ("Amplitude", 0.1..=1.0),
+            ],
+            6 => [
+                ("Recovery a", 0.65..=0.9),
+                ("Threshold b", 0.01..=0.07),
+                ("Epsilon", 0.02..=0.08),
+            ],
+            _ => [
+                ("Toroidal turns", 1.0..=7.0),
+                ("Poloidal turns", 1.0..=7.0),
+                ("Tube radius", 0.08..=0.24),
             ],
         };
         let mut changed = false;
@@ -301,21 +399,30 @@ impl Science {
         {
             let slider = egui::Slider::new(&mut self.params[i], range).text(label);
             changed |= ui
-                .add(if self.kind == 3 || (self.kind == 4 && i == 1) {
-                    slider.integer()
-                } else {
-                    slider
-                })
+                .add(
+                    if self.kind == 3
+                        || (self.kind == 4 && i == 1)
+                        || (matches!(self.kind, 5 | 7) && i < 2)
+                    {
+                        slider.integer()
+                    } else {
+                        slider
+                    },
+                )
                 .changed();
+        }
+        if self.kind == 5 {
+            self.params[1] = self.params[1].min(self.params[0]);
         }
         if ui.button("Restore defaults").clicked() {
             self.params = Self::defaults(self.kind);
             self.time = 0.0;
             self.value_time = 0.0;
             self.animate = false;
-            self.animate_values = false;
+            self.animate_values = self.has_value_animation();
             self.motion_speed = 1.0;
             self.motion_strength = 1.0;
+            self.reaction = None;
             changed = true;
         }
         if self.has_value_animation() {
@@ -329,19 +436,14 @@ impl Science {
             changed |= ui
                 .add(egui::Slider::new(&mut self.motion_strength, 0.0..=1.0).text("Intensity"))
                 .changed();
-            ui.label(self.motion_description());
         }
         if changed {
             self.rebuild();
         }
-        ui.separator();
-        ui.set_max_width(330.0);
-        ui.label(Self::DESCRIPTIONS[self.kind]);
-        ui.hyperlink_to("Model reference", Self::REFERENCES[self.kind]);
     }
     pub fn toolbar(&mut self, ui: &mut egui::Ui) {
         if ui.button("Compare setting").clicked() {
-            let alternatives = [1.0, 0.0, -0.65, 4.0, 75.0];
+            let alternatives = [1.0, 0.0, -0.65, 4.0, 75.0, 6.0, 0.85, 3.0];
             let d = Self::defaults(self.kind)[0];
             self.params[0] = if (self.params[0] - d).abs() < 1e-6 {
                 alternatives[self.kind]
@@ -361,36 +463,30 @@ impl Science {
             );
         }
         ui.label(match self.kind {
-            0 => format!(
-                "Phase: {:.2} pi | blue negative, orange positive",
-                self.params[0]
-            ),
-            1 => format!("e = {:.2} | 24 equal-time samples", self.params[0]),
-            2 => format!("Correlation: {:.2} | Z scale: 8x", self.params[0]),
+            0 => format!("Phase: {:.2} π", self.params[0]),
+            1 => format!("e = {:.2}", self.params[0]),
+            2 => format!("Correlation: {:.2} · Z ×8", self.params[0]),
             3 => format!(
-                "Frequency ratio {:.0}:{:.0}:{:.0}",
+                "{:.0}:{:.0}:{:.0}",
                 self.params[0], self.params[1], self.params[2]
             ),
-            _ => format!(
-                "Tilt: {:.0} degrees | arrows show direction",
-                self.params[0]
-            ),
+            4 => format!("Tilt: {:.0}°", self.params[0]),
+            5 => format!("l = {:.0}, m = {:.0}", self.params[0], self.params[1]),
+            6 => "Barkley model · Z ×2.4".to_owned(),
+            _ => format!("({:.0}, {:.0})", self.params[0], self.params[1]),
         });
     }
     fn has_value_animation(&self) -> bool {
-        matches!(self.kind, 0 | 3 | 4)
+        matches!(self.kind, 0 | 3..=7)
     }
     fn motion_description(&self) -> &'static str {
         match self.kind {
-            0 => {
-                "Animate values varies source phase, wavelength, and separation with sine functions while the waves travel. Sliders set the base values."
-            }
-            3 => {
-                "Animate values varies all three phases and amplitudes, and blends in higher harmonics. Every sample moves; the integer-frequency curve stays closed. Sliders set the base frequencies."
-            }
-            _ => {
-                "Animate values precesses the dipole axis and varies the radii of the sampled field lines. This shows a sequence of ideal dipole shapes, not a time-dependent electromagnetic simulation."
-            }
+            0 => "Vary phase, wavelength, and source separation. Sliders set the base values.",
+            3 => "Vary phases, amplitudes, and higher harmonics while keeping the curve closed.",
+            4 => "Rotate the dipole and vary the sampled field-line radii.",
+            5 => "Oscillate a spherical harmonic mode.",
+            6 => "Evolve activation and recovery; intensity controls the height.",
+            _ => "Send deformation waves along the tubes.",
         }
     }
     pub fn motion_toolbar(&mut self, ui: &mut egui::Ui) {
@@ -408,19 +504,28 @@ impl Science {
             if ui.button("Reset motion").clicked() {
                 self.reset_motion();
             }
-            ui.label(egui::RichText::new("Speed & intensity in Parameters").weak());
         });
     }
     pub fn animation_bounds(&self) -> Option<PlotBounds> {
         match self.kind {
             3 => Some(PlotBounds::from_min_max([-1.6; 3], [1.6; 3])),
             4 => Some(PlotBounds::from_min_max([-4.4; 3], [4.4; 3])),
+            5 => Some(PlotBounds::from_min_max([-3.2; 3], [3.2; 3])),
+            6 => Some(PlotBounds::from_min_max(
+                [-5.0, -5.0, 0.0],
+                [5.0, 5.0, 1.05],
+            )),
+            7 => Some(PlotBounds::from_min_max(
+                [-3.6, -3.6, -1.7],
+                [3.6, 3.6, 1.7],
+            )),
             _ => None,
         }
     }
     fn reset_motion(&mut self) {
         self.animate_values = false;
         self.value_time = 0.0;
+        self.reaction = None;
         self.rebuild();
     }
     pub fn update(&mut self, dt: f32) {
@@ -429,13 +534,16 @@ impl Science {
         }
         if self.animate_values {
             self.value_time += dt as f64 * self.motion_speed;
+            if let Some(model) = &mut self.reaction {
+                model.advance(dt as f64 * self.motion_speed);
+            }
         }
         if self.animate_values || (self.kind == 0 && self.animate) {
             // Keep cached thumbnails while playing; regenerate the main data only.
             self.rebuild_scene();
         }
     }
-    pub fn plot(&self, ui: &mut PlotUi<'_>) {
+    pub fn plot<'a>(&'a self, ui: &mut PlotUi<'a>) {
         self.scene.plot(ui);
         let point = match self.kind {
             1 => Some(crate::kepler::position(
@@ -479,8 +587,20 @@ impl Science {
             3 => {
                 crate::harmonics::build_animated(self.params, self.value_time, self.motion_strength)
             }
-            _ if self.value_time == 0.0 => crate::dipole::build(self.params),
-            _ => crate::dipole::build_animated(self.params, self.value_time, self.motion_strength),
+            4 if self.value_time == 0.0 => crate::dipole::build(self.params),
+            4 => crate::dipole::build_animated(self.params, self.value_time, self.motion_strength),
+            5 => crate::spherical::build(self.params, self.value_time, self.motion_strength),
+            6 => {
+                if self
+                    .reaction
+                    .as_ref()
+                    .is_none_or(|m| m.params != self.params)
+                {
+                    self.reaction = Some(crate::spirals::Model::new(self.params));
+                }
+                self.reaction.as_ref().unwrap().scene(self.motion_strength)
+            }
+            _ => crate::knots::build(self.params, self.value_time, self.motion_strength),
         };
     }
 }
@@ -538,6 +658,9 @@ mod animation_tests {
     use super::*;
     fn vertices(scene: &Scene) -> Vec<[f64; 3]> {
         let mut result: Vec<[f64; 3]> = Vec::new();
+        if let Some(mesh) = &scene.mesh {
+            result.extend(mesh.vertices.as_slice());
+        }
         if let Some(surface) = &scene.surface {
             for (triangle, _) in surface.triangles.iter() {
                 result.extend(triangle);
@@ -553,10 +676,10 @@ mod animation_tests {
     }
     #[test]
     fn value_animation_moves_geometry_then_freezes_and_resets() {
-        for kind in [0, 3, 4] {
+        for kind in [0, 3, 4, 5, 7] {
             let mut model = Science::new(kind);
             let initial = vertices(&model.scene);
-            model.animate_values = true;
+            assert!(model.animate_values);
             for _ in 0..90 {
                 model.update(1.0 / 60.0);
             }
@@ -588,6 +711,28 @@ mod animation_tests {
             model.reset_motion();
             assert_eq!(initial, vertices(&model.scene));
         }
+    }
+    #[test]
+    fn spiral_animation_is_live_and_resettable() {
+        let mut model = Science::new(6);
+        let initial = vertices(&model.scene);
+        for _ in 0..120 {
+            model.update(1.0 / 60.0);
+        }
+        let moving = vertices(&model.scene);
+        assert!(
+            initial
+                .iter()
+                .zip(&moving)
+                .filter(|(a, b)| (a[2] - b[2]).abs() > 0.05)
+                .count()
+                > 100
+        );
+        model.animate_values = false;
+        model.update(1.0);
+        assert_eq!(moving, vertices(&model.scene));
+        model.reset_motion();
+        assert_eq!(initial, vertices(&model.scene));
     }
     #[test]
     fn morphing_harmonics_remain_closed() {

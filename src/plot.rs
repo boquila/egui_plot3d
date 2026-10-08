@@ -8,18 +8,25 @@ use std::collections::HashSet;
 type LabelFormatter<'a> = Box<dyn Fn(&HoveredPoint) -> Option<String> + 'a>;
 
 #[derive(Clone, Copy, Debug, Default)]
+/// Corner of the plot rectangle.
 pub enum Corner {
+    /// Upper left.
     LeftTop,
     #[default]
+    /// Upper right (default).
     RightTop,
+    /// Lower left.
     LeftBottom,
+    /// Lower right.
     RightBottom,
 }
 #[derive(Clone, Debug, Default)]
+/// Optional series legend with click-to-toggle visibility.
 pub struct Legend {
     corner: Corner,
 }
 impl Legend {
+    /// Choose the plot corner containing the legend (default top right).
     pub fn position(mut self, corner: Corner) -> Self {
         self.corner = corner;
         self
@@ -27,23 +34,37 @@ impl Legend {
 }
 
 #[derive(Clone, Debug)]
+/// The nearest-depth pickable sample within the pointer hit area.
 pub struct HoveredPoint {
+    /// Stable ID of the picked item.
     pub item_id: Id,
+    /// Displayed name of the picked item.
     pub name: String,
     /// Point index, or the first vertex of a line segment.
     pub index: usize,
+    /// World-space sample or interpolated segment position.
     pub position: PlotPoint,
+    /// Picked screen position in logical pixels.
     pub screen_position: Pos2,
+    /// Positive camera-space depth; smaller values are closer.
     pub depth: f32,
+    /// Distance from the pointer in logical pixels.
     pub distance: f32,
 }
 
+/// Result of building and interacting with one plot.
 pub struct PlotResponse<R> {
+    /// Return value from the plot-building closure.
     pub inner: R,
+    /// Egui response for the plot rectangle.
     pub response: Response,
+    /// Final transform after fitting this frame's data and applying input.
     pub transform: PlotTransform,
+    /// Stable ID of the currently picked item.
     pub hovered_plot_item: Option<Id>,
+    /// Picked sample, suppressed while dragging or hovering the legend.
     pub hovered_point: Option<HoveredPoint>,
+    /// Picked sample on a primary click; otherwise `None`.
     pub clicked_point: Option<HoveredPoint>,
     /// Number of visible point/segment/triangle/text primitives after clipping.
     pub rendered_primitives: usize,
@@ -55,6 +76,7 @@ struct PlotMemory {
     hidden: HashSet<Id>,
     bounds: PlotBounds,
     manual_bounds: Option<PlotBounds>,
+    force_auto_bounds: bool,
 }
 
 /// Build a plot every frame; camera and legend state persist under its ID.
@@ -88,6 +110,7 @@ pub struct Plot<'label> {
     label_formatter: Option<LabelFormatter<'label>>,
 }
 impl<'label> Plot<'label> {
+    /// Create a plot with an ID salt scoped to its parent UI. Use distinct stable salts for separate plots.
     pub fn new(id_source: impl egui::AsId) -> Self {
         Self {
             id: Id::new(id_source),
@@ -124,14 +147,17 @@ impl<'label> Plot<'label> {
         self.explicit_id = Some(id);
         self
     }
+    /// Set width in logical pixels. Otherwise use available width, or derive it from height and view aspect.
     pub fn width(mut self, width: f32) -> Self {
         self.width = Some(width);
         self
     }
+    /// Set height in logical pixels. Unbounded layouts fall back to the visible clip rectangle.
     pub fn height(mut self, height: f32) -> Self {
         self.height = Some(height);
         self
     }
+    /// Set plot width / height. Derives the unspecified dimension; ignored when both dimensions are explicit.
     pub fn view_aspect(mut self, aspect: f32) -> Self {
         if aspect.is_finite() && aspect > 0.0 {
             self.aspect = Some(aspect);
@@ -157,38 +183,47 @@ impl<'label> Plot<'label> {
         self.axis_aspect = [1.0; 3];
         self
     }
+    /// Display a legend. Clicking an entry toggles its series without changing fitted bounds.
     pub fn legend(mut self, legend: Legend) -> Self {
         self.legend = Some(legend);
         self
     }
+    /// Show the XY grid at the minimum Z bound (default true).
     pub fn show_grid(mut self, show: bool) -> Self {
         self.grid = show;
         self
     }
+    /// Show axis lines, ticks, and labels for X, Y, and Z (all enabled by default).
     pub fn show_axes(mut self, show: [bool; 3]) -> Self {
         self.axes = show;
         self
     }
+    /// Show the plot background (default true). This does not change the configured background color.
     pub fn show_background(mut self, show: bool) -> Self {
         self.show_background = show;
         self
     }
+    /// Override the theme background color.
     pub fn background_color(mut self, color: Color32) -> Self {
         self.background = Some(color);
         self
     }
+    /// Show the twelve edges of the fitted bounding box (default true).
     pub fn show_frame(mut self, show: bool) -> Self {
         self.frame = show;
         self
     }
+    /// Set the X-axis label (default "X").
     pub fn x_axis_label(mut self, label: impl Into<String>) -> Self {
         self.labels[0] = label.into();
         self
     }
+    /// Set the Y-axis label (default "Y").
     pub fn y_axis_label(mut self, label: impl Into<String>) -> Self {
         self.labels[1] = label.into();
         self
     }
+    /// Set the Z-axis label (default "Z").
     pub fn z_axis_label(mut self, label: impl Into<String>) -> Self {
         self.labels[2] = label.into();
         self
@@ -198,37 +233,46 @@ impl<'label> Plot<'label> {
         self.camera = Some(camera);
         self
     }
+    /// Override the camera projection for this frame.
     pub fn projection(mut self, projection: Projection) -> Self {
         self.projection = Some(projection);
         self
     }
+    /// Reset camera and bounds on this frame, preserving projection and legend visibility.
     pub fn reset(mut self) -> Self {
         self.reset = true;
         self
     }
+    /// Allow primary dragging to orbit (default true). Panning is controlled separately by [`Self::allow_pan`].
     pub fn allow_drag(mut self, allow: bool) -> Self {
         self.drag = allow;
         self
     }
+    /// Allow wheel and pinch zoom while hovering (default true).
     pub fn allow_zoom(mut self, allow: bool) -> Self {
         self.zoom = allow;
         self
     }
+    /// Alias for [`Self::allow_zoom`]; controls both wheel and pinch zoom.
     pub fn allow_scroll(self, allow: bool) -> Self {
         self.allow_zoom(allow)
     }
+    /// Allow secondary, middle, or Shift-primary dragging to pan (default true).
     pub fn allow_pan(mut self, allow: bool) -> Self {
         self.pan = allow;
         self
     }
+    /// Allow double-clicking the plot to reset its camera and bounds (default true).
     pub fn allow_double_click_reset(mut self, allow: bool) -> Self {
         self.double_click = allow;
         self
     }
+    /// Enable sample picking, highlighting, and hover text (default true).
     pub fn allow_hover(mut self, allow: bool) -> Self {
         self.hover = allow;
         self
     }
+    /// Dim distant geometry for a depth cue (default true). Does not alter depth order.
     pub fn depth_cue(mut self, enable: bool) -> Self {
         self.depth_cue = enable;
         self
@@ -241,39 +285,50 @@ impl<'label> Plot<'label> {
         self.label_formatter = Some(Box::new(formatter));
         self
     }
+    /// Starting and reset bounds. Explicit [`PlotUi`] bounds/auto-fit choices take precedence.
     pub fn default_bounds(mut self, bounds: PlotBounds) -> Self {
-        self.bounds = Some(bounds);
+        if bounds.is_valid() {
+            self.bounds = Some(bounds);
+        }
         self
     }
+    /// Starting/reset X range. Invalid ranges are ignored; explicit PlotUi bounds or auto-fit choices take precedence.
     pub fn default_x_bounds(mut self, min: f64, max: f64) -> Self {
         self.axis_bounds[0] = Some([min, max]);
         self
     }
+    /// Starting/reset Y range. Invalid ranges are ignored; explicit PlotUi bounds or auto-fit choices take precedence.
     pub fn default_y_bounds(mut self, min: f64, max: f64) -> Self {
         self.axis_bounds[1] = Some([min, max]);
         self
     }
+    /// Starting/reset Z range. Invalid ranges are ignored; explicit PlotUi bounds or auto-fit choices take precedence.
     pub fn default_z_bounds(mut self, min: f64, max: f64) -> Self {
         self.axis_bounds[2] = Some([min, max]);
         self
     }
+    /// Expand automatically fitted/default bounds to include a finite X coordinate.
     pub fn include_x(mut self, value: impl Into<f64>) -> Self {
         self.includes.extend_with_x(value.into());
         self
     }
+    /// Expand automatically fitted/default bounds to include a finite Y coordinate.
     pub fn include_y(mut self, value: impl Into<f64>) -> Self {
         self.includes.extend_with_y(value.into());
         self
     }
+    /// Expand automatically fitted/default bounds to include a finite Z coordinate.
     pub fn include_z(mut self, value: impl Into<f64>) -> Self {
         self.includes.extend_with_z(value.into());
         self
     }
+    /// Expand automatically fitted/default bounds to include a finite point.
     pub fn include_point(mut self, point: impl Into<PlotPoint>) -> Self {
         self.includes.extend_with(point);
         self
     }
 
+    /// Build items and show the plot, returning the closure result, interaction response, and final transform.
     pub fn show<'a, R>(
         self,
         ui: &mut Ui,
@@ -323,6 +378,7 @@ impl<'label> Plot<'label> {
             };
             memory.bounds = PlotBounds::NOTHING;
             memory.manual_bounds = None;
+            memory.force_auto_bounds = false;
         }
         if let Some(projection) = self.projection {
             memory.camera.projection = projection;
@@ -335,7 +391,7 @@ impl<'label> Plot<'label> {
                 || (shift && response.dragged_by(PointerButton::Primary)))
         {
             memory.camera.pan += Vec2::new(delta.x / width, delta.y / height);
-        } else if self.drag && response.dragged_by(PointerButton::Primary) {
+        } else if self.drag && !shift && response.dragged_by(PointerButton::Primary) {
             memory.camera.orbit(delta);
         }
         if response.hovered() && self.zoom {
@@ -356,7 +412,11 @@ impl<'label> Plot<'label> {
             items: Vec::new(),
             transform: previous_transform,
             pointer: response.hover_pos(),
-            bounds: self.bounds.or(memory.manual_bounds),
+            bounds: if memory.force_auto_bounds {
+                None
+            } else {
+                memory.manual_bounds.or(self.bounds)
+            },
             bounds_changed: false,
             camera: None,
             response: response.clone(),
@@ -364,6 +424,7 @@ impl<'label> Plot<'label> {
         let inner = build(&mut plot_ui);
         if plot_ui.bounds_changed {
             memory.manual_bounds = plot_ui.bounds;
+            memory.force_auto_bounds = plot_ui.bounds.is_none();
         }
         if let Some(camera) = plot_ui.camera {
             memory.camera = camera.sanitized();
@@ -375,8 +436,10 @@ impl<'label> Plot<'label> {
             }
         }
         bounds = bounds.fitted();
-        bounds.include_partial(self.includes);
-        if !plot_ui.bounds_changed && memory.manual_bounds.is_none() {
+        if memory.manual_bounds.is_none() {
+            bounds.include_partial(self.includes);
+        }
+        if !plot_ui.bounds_changed && memory.manual_bounds.is_none() && !memory.force_auto_bounds {
             for (axis, range) in self.axis_bounds.iter().enumerate() {
                 if let Some([min, max]) = range {
                     bounds.set_axis(axis, *min, *max);
@@ -385,6 +448,18 @@ impl<'label> Plot<'label> {
         }
         memory.bounds = bounds.fitted();
         let transform = make_transform(memory.bounds, memory.camera);
+        if !ui.is_rect_visible(rect) {
+            ui.ctx().data_mut(|d| d.insert_temp(id, memory));
+            return PlotResponse {
+                inner,
+                response,
+                transform,
+                hovered_plot_item: None,
+                hovered_point: None,
+                clicked_point: None,
+                rendered_primitives: 0,
+            };
+        }
         let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
         if self.show_background {
             painter.rect_filled(
@@ -552,6 +627,7 @@ pub(crate) fn palette(index: usize) -> Color32 {
     Color32::from_rgb(c[0], c[1], c[2])
 }
 
+/// Submit plot items and control the camera/bounds inside [`Plot::show`].
 pub struct PlotUi<'a> {
     items: Vec<Box<dyn PlotItem + 'a>>,
     transform: PlotTransform,
@@ -562,21 +638,31 @@ pub struct PlotUi<'a> {
     response: Response,
 }
 impl<'a> PlotUi<'a> {
+    /// Submit a custom plot item. Geometry participates in the shared projection and depth ordering.
     pub fn add(&mut self, item: impl PlotItem + 'a) {
         self.items.push(Box::new(item));
     }
+    /// Submit a marker series.
     pub fn points(&mut self, item: Points<'a>) {
         self.add(item);
     }
+    /// Submit a polyline.
     pub fn line(&mut self, item: Line<'a>) {
         self.add(item);
     }
+    /// Add a filled indexed triangle surface.
+    pub fn surface(&mut self, item: crate::Surface<'a>) {
+        self.add(item);
+    }
+    /// Submit a vector series.
     pub fn arrows(&mut self, item: Arrows<'a>) {
         self.add(item);
     }
+    /// Submit a filled convex planar polygon.
     pub fn polygon(&mut self, item: Polygon<'a>) {
         self.add(item);
     }
+    /// Submit a world-positioned text label.
     pub fn text(&mut self, item: Text) {
         self.add(item);
     }
@@ -584,6 +670,7 @@ impl<'a> PlotUi<'a> {
     pub fn plot_bounds(&self) -> PlotBounds {
         self.transform.bounds()
     }
+    /// Freeze finite bounds until reset or an explicit auto-fit request; overrides builder defaults.
     pub fn set_plot_bounds(&mut self, bounds: PlotBounds) {
         if bounds.is_valid() {
             self.bounds = Some(bounds);
@@ -595,15 +682,19 @@ impl<'a> PlotUi<'a> {
         self.bounds = if auto { None } else { Some(self.plot_bounds()) };
         self.bounds_changed = true;
     }
+    /// Current camera, including a camera set earlier in this closure.
     pub fn camera(&self) -> Camera {
         self.camera.unwrap_or(self.transform.camera())
     }
+    /// Override the camera for this frame and persist it for following frames.
     pub fn set_camera(&mut self, camera: Camera) {
         self.camera = Some(camera);
     }
+    /// Unproject the pointer onto the view-parallel plane through the plot center using the previous fitted bounds.
     pub fn pointer_coordinate(&self) -> Option<PlotPoint> {
         self.transform.point_from_position(self.pointer?, 4.0)
     }
+    /// Response for the plot rectangle, for custom input handling.
     pub fn response(&self) -> &Response {
         &self.response
     }

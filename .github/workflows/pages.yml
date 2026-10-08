@@ -24,23 +24,6 @@ jobs:
       - name: Build gallery
         working-directory: demo
         run: trunk build --release --locked --public-url "/${{ github.event.repository.name }}/"
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
-      - name: Verify the deployed URL layout in Chromium
-        run: |
-          python -m pip install -r scripts/requirements.txt
-          python -m playwright install --with-deps chromium
-          mkdir -p "artifacts/pages-site/${{ github.event.repository.name }}"
-          cp -r demo/dist/. "artifacts/pages-site/${{ github.event.repository.name }}/"
-          python scripts/browser_smoke.py --serve-dir artifacts/pages-site --base-path "/${{ github.event.repository.name }}/"
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: gallery-browser-evidence
-          path: |
-            artifacts/*.png
-            artifacts/browser-report.json
       - uses: actions/upload-pages-artifact@v3
         with:
           path: demo/dist

@@ -22,7 +22,7 @@ pub struct Gallery {
     orthographic: bool,
     spin: bool,
     reset: bool,
-    camera: [Camera; 7],
+    camera: Vec<Camera>,
 }
 
 impl Gallery {
@@ -32,7 +32,7 @@ impl Gallery {
         Self {
             cloud: Cloud::default(),
             lorenz: Lorenz::default(),
-            science: (0..5).map(Science::new).collect(),
+            science: (0..Science::TITLES.len()).map(Science::new).collect(),
             selected: None,
             grid: true,
             axes: true,
@@ -42,13 +42,15 @@ impl Gallery {
             orthographic: false,
             spin: false,
             reset: false,
-            camera: std::array::from_fn(|i| {
-                if i < 2 {
-                    Camera::default()
-                } else {
-                    Science::camera(i - 2)
-                }
-            }),
+            camera: (0..Science::TITLES.len() + 2)
+                .map(|i| {
+                    if i < 2 {
+                        Camera::default()
+                    } else {
+                        Science::camera(i - 2)
+                    }
+                })
+                .collect(),
         }
     }
 
@@ -114,7 +116,7 @@ impl Gallery {
                     ui.heading("Examples");
                     ui.separator();
                     egui::Grid::new("examples_grid").show(ui, |ui| {
-                        for index in 0..7 {
+                        for index in 0..self.camera.len() {
                             self.make_cell(index, ui, scale);
                             if (index + 1) % columns == 0 {
                                 ui.end_row();
@@ -181,24 +183,18 @@ impl Gallery {
                 ui.label(RichText::new(Self::title(index)).heading());
                 ui.separator();
                 ui.label(RichText::new(if index == 0 {
-                    "A 3D point cloud with five clusters, inspired by BoquilaHub's embedding plot. Drag to orbit, right-drag to pan, and scroll to zoom. Click a point to inspect its coordinates."
+                    "Five point clusters. Drag to orbit, right-drag to pan, scroll to zoom. Click a point to inspect it."
                 } else if index == 1 {
-                    "A 3D Lorenz attractor integrated with fourth-order Runge-Kutta. Change the system parameters or compare nearby initial conditions to explore sensitivity to initial conditions."
+                    "A chaotic trail drawn from (1, 1, 1). Animate values varies the system parameters; nearby initial conditions reveal divergence."
                 } else {
                     Science::DESCRIPTIONS[index-2]
                 }).line_height(Some(20.0)));
-                if index>=2 { ui.hyperlink_to("Model reference",Science::REFERENCES[index-2]); }
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("Tags:");
-                    for &tag in Self::tags(index) {
-                        ui.label(RichText::new(tag).background_color(ui.visuals().widgets.inactive.bg_fill).small());
-                    }
-                });
+                if index>=2 { ui.hyperlink_to("Reference",Science::REFERENCES[index-2]); }
                 ui.separator();
                 let name = if index == 0 { "cloud" } else if index == 1 { "lorenz" } else {Science::NAMES[index-2]};
                 ui.horizontal(|ui| {
-                    ui.label(format!("Code of `{name}` see also on "));
-                    ui.hyperlink_to(format!("{GITHUB} Github"), format!("{GITHUB_URL}/blob/main/demo/src/{name}.rs"));
+                    ui.label("Source");
+                    ui.hyperlink_to(format!("{GITHUB} GitHub"), format!("{GITHUB_URL}/blob/main/demo/src/{name}.rs"));
                 });
                 let source = if index == 0 { include_str!("cloud.rs") } else if index == 1 { include_str!("lorenz.rs") } else {Science::SOURCES[index-2]};
                 ScrollArea::both().show(ui, |ui| {
@@ -225,7 +221,11 @@ impl Gallery {
                 ui.checkbox(&mut self.axes, "Axes and ticks");
                 ui.checkbox(&mut self.frame, "Bounding box");
                 ui.checkbox(&mut self.equal, "Equal axis scale");
-                ui.checkbox(&mut self.depth, "Depth shading");
+                ui.add_enabled(
+                    !matches!(index, 2 | 7..=9),
+                    egui::Checkbox::new(&mut self.depth, "Depth shading"),
+                )
+                .on_disabled_hover_text("This surface supplies its own colors and shading.");
                 ui.checkbox(&mut self.orthographic, "Orthographic projection");
             });
             ui.checkbox(&mut self.spin, "Auto orbit");
@@ -233,19 +233,23 @@ impl Gallery {
                 self.reset = true;
             }
         });
-        ui.horizontal_wrapped(|ui| {
-            if index == 0 {
-                ui.checkbox(&mut self.cloud.colored, "Color by cluster");
-                ui.label(format!("{} points", self.cloud.count));
-            } else if index == 1 {
-                ui.checkbox(&mut self.lorenz.animate, "Animate particle");
-                ui.checkbox(&mut self.lorenz.show_neighbor, "Nearby initial condition");
-            } else {
-                self.science[index - 2].toolbar(ui);
-            }
-        });
-        if index >= 2 {
+        if index != 1 {
+            ui.horizontal_wrapped(|ui| {
+                if index == 0 {
+                    ui.checkbox(&mut self.cloud.colored, "Color by cluster");
+                    ui.label(format!("{} points", self.cloud.count));
+                } else {
+                    self.science[index - 2].toolbar(ui);
+                }
+            });
+        }
+        if index == 1 {
+            self.lorenz.toolbar(ui);
+        } else if index >= 2 {
             self.science[index - 2].motion_toolbar(ui);
+            if index == 2 {
+                crate::waves::color_scale(ui);
+            }
         }
         if index == 0
             && let Some((name, sample, p)) = &self.cloud.selected
@@ -261,14 +265,16 @@ impl Gallery {
         egui::CentralPanel::default().show(ui, |ui| {
             let Some(index) = self.selected else {
                 ui.vertical_centered(|ui| {
-                    ui.heading("Select an example from the left panel");
+                    ui.heading("Select an example");
                 });
                 return;
             };
             self.controls(ui, index);
             ui.separator();
             let dt = ui.input(|i| i.stable_dt).min(0.05);
-            if index >= 2 {
+            if index == 1 {
+                self.lorenz.update(dt);
+            } else if index >= 2 {
                 self.science[index - 2].update(dt);
             }
             let mut camera = self.camera[index];
@@ -296,16 +302,18 @@ impl Gallery {
                 .show_axes([self.axes; 3])
                 .show_frame(self.frame)
                 .equal_axis_scale(self.equal)
-                .depth_cue(self.depth)
+                .depth_cue(self.depth && !matches!(index, 2 | 7..=9))
                 .legend(Legend::default());
-            if index >= 2 {
+            if index == 1 {
+                plot = plot.default_bounds(self.lorenz.bounds());
+            } else if index >= 2 {
                 let example = &self.science[index - 2];
                 let labels = example.axes();
                 plot = plot
                     .x_axis_label(labels[0])
                     .y_axis_label(labels[1])
                     .z_axis_label(labels[2]);
-                if example.kind == 2 {
+                if matches!(example.kind, 2 | 6) {
                     plot = plot.axis_aspect(example.aspect());
                 }
                 if let Some(bounds) = example.animation_bounds() {
@@ -316,7 +324,7 @@ impl Gallery {
                 if index == 0 {
                     self.cloud.plot(p);
                 } else if index == 1 {
-                    self.lorenz.plot(p, dt);
+                    self.lorenz.plot(p);
                 } else {
                     self.science[index - 2].plot(p);
                 }
@@ -327,7 +335,7 @@ impl Gallery {
             {
                 self.cloud.selected = Some((h.name, h.index, h.position.to_array()));
             }
-            if (index == 1 && self.lorenz.animate)
+            if (index == 1 && self.lorenz.is_animating())
                 || (index >= 2
                     && (self.science[index - 2].animate || self.science[index - 2].animate_values))
             {

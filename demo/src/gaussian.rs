@@ -1,7 +1,7 @@
 use crate::science::{GREEN, ORANGE, Scene, Series, gradient, surface};
 use std::f64::consts::{PI, TAU};
 
-pub const DESCRIPTION: &str = "The height is a normalized bivariate Gaussian probability density, not a probability at a point. Flip correlation to turn the ridge; zero correlation removes the tilt. Green and orange contours mark Mahalanobis radii 1 and 2, enclosing about 39% and 86% of the full distribution. The contour lines are lifted slightly above the surface for visibility. X standard deviation is 1. Z is magnified 8x; ticks show actual density. The displayed surface is truncated at x,y = +/-4.5.";
+pub const DESCRIPTION: &str = "A Gaussian density shaped by correlation. Contours enclose 39% and 86% of the distribution. Height is enlarged 8×; ticks show actual density.";
 
 pub fn density(x: f64, y: f64, rho: f64, sy: f64) -> f64 {
     let q = 1.0 - rho * rho;
