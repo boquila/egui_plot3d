@@ -2,5 +2,30 @@
 name = "egui_plot3d"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.95"
+description = "Immediate mode 3D plots for egui"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/boquila/egui_plot3d"
+readme = "README.md"
+include = ["src/**", "tests/**", "benches/**", "Cargo.toml", "README.md", "LICENSE-*"]
+
+[workspace]
+members = ["demo"]
+resolver = "2"
 
 [dependencies]
+egui = { version = "0.36.2", default-features = false }
+
+[dev-dependencies]
+egui = { version = "0.36.2", features = ["default_fonts"] }
+
+[[bench]]
+name = "render"
+harness = false
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+
+[profile.dev.package."*"]
+opt-level = 2
