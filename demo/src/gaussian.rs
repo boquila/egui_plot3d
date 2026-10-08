@@ -1,4 +1,5 @@
-use crate::science::{GREEN, ORANGE, Scene, Series, gradient, surface};
+use crate::science::{BLUE, GREEN, IndexedSurface, ORANGE, Scene, Series};
+use egui_plot3d::{ColorMap, ColorScale, SurfaceGrid};
 use std::f64::consts::{PI, TAU};
 
 pub const DESCRIPTION: &str = "A Gaussian density shaped by correlation. Contours enclose 39% and 86% of the distribution. Height is enlarged 8×; ticks show actual density.";
@@ -10,13 +11,14 @@ pub fn density(x: f64, y: f64, rho: f64, sy: f64) -> f64 {
 }
 pub fn build(p: [f64; 3]) -> Scene {
     let peak = density(0.0, 0.0, p[0], p[1]);
+    let grid = SurfaceGrid::from_fn(-4.5..=4.5, -4.5..=4.5, [65, 65], |x, y| {
+        density(x, y, p[0], p[1])
+    });
     Scene {
-        surface: Some(surface(
+        mesh: Some(IndexedSurface::from_grid(
             "Probability density",
-            4.5,
-            65,
-            |x, y| density(x, y, p[0], p[1]),
-            |z| gradient(z / peak),
+            &grid,
+            &ColorScale::new(0.0..=peak, ColorMap::custom([BLUE, ORANGE])),
         )),
         lines: [
             (1.0, GREEN, "Radius 1: 39%"),

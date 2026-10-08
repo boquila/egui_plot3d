@@ -642,6 +642,13 @@ impl<'a> PlotUi<'a> {
     pub fn add(&mut self, item: impl PlotItem + 'a) {
         self.items.push(Box::new(item));
     }
+    /// Submit a collection of layers. Items may be owned or borrowed; an
+    /// iterator of `&dyn PlotItem` can mix geometry types without cloning data.
+    pub fn extend<T: PlotItem + 'a>(&mut self, items: impl IntoIterator<Item = T>) {
+        for item in items {
+            self.add(item);
+        }
+    }
     /// Submit a marker series.
     pub fn points(&mut self, item: Points<'a>) {
         self.add(item);

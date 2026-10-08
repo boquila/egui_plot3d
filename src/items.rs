@@ -1,7 +1,6 @@
 use crate::render::PlotItemContext;
-use crate::{PlotBounds, PlotPoint, PlotPoints};
+use crate::{ColorScale, PlotBounds, PlotPoint, PlotPoints, PlotValues};
 use egui::{Color32, Id};
-use std::borrow::Cow;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 /// Screen-space marker outline.
@@ -37,6 +36,29 @@ pub trait PlotItem {
     /// Whether submitted points and segments can be picked (default true).
     fn allow_hover(&self) -> bool {
         true
+    }
+}
+
+// Borrow reusable items (including heterogeneous `&dyn PlotItem` layers)
+// without copying their coordinates, style columns, or custom state.
+impl<T: PlotItem + ?Sized> PlotItem for &T {
+    fn name(&self) -> &str {
+        (**self).name()
+    }
+    fn id(&self) -> Id {
+        (**self).id()
+    }
+    fn color(&self) -> Option<Color32> {
+        (**self).color()
+    }
+    fn bounds(&self) -> PlotBounds {
+        (**self).bounds()
+    }
+    fn render(&self, context: &mut PlotItemContext<'_>) {
+        (**self).render(context);
+    }
+    fn allow_hover(&self) -> bool {
+        (**self).allow_hover()
     }
 }
 
@@ -117,8 +139,8 @@ macro_rules! trait_style {
 pub struct Surface<'a> {
     style: Style,
     vertices: PlotPoints<'a>,
-    indices: Cow<'a, [[u32; 3]]>,
-    colors: Option<&'a [Color32]>,
+    indices: PlotValues<'a, [u32; 3]>,
+    colors: PlotValues<'a, Color32>,
     shading: bool,
 }
 impl<'a> Surface<'a> {
@@ -126,20 +148,43 @@ impl<'a> Surface<'a> {
     pub fn new(
         name: impl Into<String>,
         vertices: impl Into<PlotPoints<'a>>,
-        indices: impl Into<Cow<'a, [[u32; 3]]>>,
+        indices: impl Into<PlotValues<'a, [u32; 3]>>,
     ) -> Self {
         Self {
             style: Style::new(name),
             vertices: vertices.into(),
             indices: indices.into(),
-            colors: None,
+            colors: PlotValues::default(),
             shading: false,
         }
     }
     style_methods!();
     /// Per-triangle colors in index order. Missing colors use the item's color.
-    pub fn colors(mut self, colors: &'a [Color32]) -> Self {
-        self.colors = Some(colors);
+    pub fn colors(mut self, colors: impl Into<PlotValues<'a, Color32>>) -> Self {
+        self.colors = colors.into();
+        self
+    }
+    /// Map a scalar at each vertex, averaging scalars per face before applying
+    /// the scale. Colors are computed once and owned by the item.
+    pub fn color_by(mut self, mut value: impl FnMut(PlotPoint) -> f64, scale: &ColorScale) -> Self {
+        let values: Vec<_> = self
+            .vertices
+            .as_slice()
+            .iter()
+            .map(|&p| value(p.into()))
+            .collect();
+        self.colors = self
+            .indices
+            .as_slice()
+            .iter()
+            .map(|f| {
+                let sum = f
+                    .iter()
+                    .try_fold(0.0, |sum, &i| values.get(i as usize).map(|v| sum + v / 3.0));
+                scale.color(sum.unwrap_or(f64::NAN))
+            })
+            .collect::<Vec<_>>()
+            .into();
         self
     }
     /// Apply two-sided directional lighting, preserving opacity (default false).
@@ -157,8 +202,8 @@ impl PlotItem for Surface<'_> {
     fn render(&self, context: &mut PlotItemContext<'_>) {
         context.indexed_triangles(
             self.vertices.as_slice(),
-            &self.indices,
-            self.colors.unwrap_or(&[]),
+            self.indices.as_slice(),
+            self.colors.as_slice(),
             self.shading,
         );
     }
@@ -170,7 +215,8 @@ pub struct Points<'a> {
     series: PlotPoints<'a>,
     radius: f32,
     shape: MarkerShape,
-    colors: Option<&'a [Color32]>,
+    colors: PlotValues<'a, Color32>,
+    radii: PlotValues<'a, f32>,
 }
 impl<'a> Points<'a> {
     /// Create markers from owned, borrowed, or shared coordinates. The name supplies the initial stable item ID.
@@ -180,7 +226,8 @@ impl<'a> Points<'a> {
             series: series.into(),
             radius: 3.0,
             shape: MarkerShape::Circle,
-            colors: None,
+            colors: PlotValues::default(),
+            radii: PlotValues::default(),
         }
     }
     style_methods!();
@@ -195,8 +242,21 @@ impl<'a> Points<'a> {
         self
     }
     /// Optional per-point colors; missing entries use the item's color.
-    pub fn colors(mut self, colors: &'a [Color32]) -> Self {
-        self.colors = Some(colors);
+    pub fn colors(mut self, colors: impl Into<PlotValues<'a, Color32>>) -> Self {
+        self.colors = colors.into();
+        self
+    }
+    /// Per-point radii in logical pixels. Missing entries use `radius`;
+    /// nonpositive/non-finite entries suppress their marker.
+    pub fn radii(mut self, radii: impl Into<PlotValues<'a, f32>>) -> Self {
+        self.radii = radii.into();
+        self
+    }
+    /// Color points by a scalar computed from each position. Colors are owned.
+    pub fn color_by(mut self, mut value: impl FnMut(PlotPoint) -> f64, scale: &ColorScale) -> Self {
+        self.colors = scale
+            .colors(self.series.as_slice().iter().map(|&p| value(p.into())))
+            .into();
         self
     }
 }
@@ -208,14 +268,19 @@ impl PlotItem for Points<'_> {
     fn render(&self, context: &mut PlotItemContext<'_>) {
         context.reserve(self.series.len());
         for (i, &p) in self.series.as_slice().iter().enumerate() {
+            let radius = self.radii.as_slice().get(i).copied().unwrap_or(self.radius);
+            if !radius.is_finite() {
+                continue;
+            }
             let color = self
                 .colors
-                .and_then(|c| c.get(i))
+                .as_slice()
+                .get(i)
                 .copied()
                 .unwrap_or(context.color());
             context.point(
                 p.into(),
-                self.radius * self.style.scale(),
+                radius.min(1000.0) * self.style.scale(),
                 self.shape,
                 color,
                 i,
@@ -229,6 +294,8 @@ pub struct Line<'a> {
     style: Style,
     series: PlotPoints<'a>,
     width: f32,
+    colors: PlotValues<'a, Color32>,
+    widths: PlotValues<'a, f32>,
 }
 impl<'a> Line<'a> {
     /// Create a polyline from owned, borrowed, or shared coordinates. Non-finite samples break the path.
@@ -237,12 +304,33 @@ impl<'a> Line<'a> {
             style: Style::new(name),
             series: series.into(),
             width: 1.5,
+            colors: PlotValues::default(),
+            widths: PlotValues::default(),
         }
     }
     style_methods!();
     /// Set stroke width in logical pixels (default 1.5). Clamped to 0..=1000; zero/NaN strokes are not drawn.
     pub fn width(mut self, width: f32) -> Self {
         self.width = width.clamp(0.0, 1000.0);
+        self
+    }
+    /// Per-segment colors, indexed by the segment's first input vertex.
+    /// NaN breaks do not shift these indices. Missing entries use the item color.
+    pub fn colors(mut self, colors: impl Into<PlotValues<'a, Color32>>) -> Self {
+        self.colors = colors.into();
+        self
+    }
+    /// Per-segment widths, indexed by the first vertex. Missing entries use
+    /// `width`; nonpositive/non-finite entries suppress their segment.
+    pub fn widths(mut self, widths: impl Into<PlotValues<'a, f32>>) -> Self {
+        self.widths = widths.into();
+        self
+    }
+    /// Color segments by the scalar at their first vertex. Colors are owned.
+    pub fn color_by(mut self, mut value: impl FnMut(PlotPoint) -> f64, scale: &ColorScale) -> Self {
+        self.colors = scale
+            .colors(self.series.as_slice().iter().map(|&p| value(p.into())))
+            .into();
         self
     }
 }
@@ -252,6 +340,21 @@ impl PlotItem for Line<'_> {
         self.series.bounds()
     }
     fn render(&self, ctx: &mut PlotItemContext<'_>) {
+        if !self.colors.is_empty() || !self.widths.is_empty() {
+            let fallback = ctx.color();
+            ctx.polyline_styled(self.series.as_slice(), |i| {
+                let width = self.widths.as_slice().get(i).copied().unwrap_or(self.width);
+                (
+                    if width.is_finite() {
+                        width.min(1000.0) * self.style.scale()
+                    } else {
+                        0.0
+                    },
+                    self.colors.as_slice().get(i).copied().unwrap_or(fallback),
+                )
+            });
+            return;
+        }
         ctx.polyline(
             self.series.as_slice(),
             self.width * self.style.scale(),

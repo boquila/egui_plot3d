@@ -1,5 +1,20 @@
 use std::sync::Arc;
 
+pub(crate) fn interpolate(start: f64, end: f64, t: f64) -> f64 {
+    if t == 0.0 {
+        return start;
+    }
+    if t == 1.0 {
+        return end;
+    }
+    let span = end - start;
+    if span.is_finite() {
+        start + span * t
+    } else {
+        start * (1.0 - t) + end * t
+    }
+}
+
 /// A point in a right-handed coordinate system (Z up).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PlotPoint {
@@ -312,18 +327,7 @@ impl<'a> PlotPoints<'a> {
             (0..points)
                 .map(|i| {
                     let t = i as f64 / intervals as f64;
-                    let value = if i == 0 {
-                        start
-                    } else if inclusive && i + 1 == points {
-                        end
-                    } else {
-                        let span = end - start;
-                        if span.is_finite() {
-                            start + span * t
-                        } else {
-                            start * (1.0 - t) + end * t
-                        }
-                    };
+                    let value = interpolate(start, end, t);
                     f(value).into().to_array()
                 })
                 .collect(),

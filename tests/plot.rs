@@ -51,6 +51,57 @@ fn borrowing_shared_bounds_and_nonfinite_data() {
         shared.clone().as_slice().as_ptr()
     );
 }
+
+#[test]
+fn styled_lines_keep_original_indices_and_colors_across_nan_breaks() {
+    let ctx = Context::default();
+    let data = [
+        [-1.0, 0.0, 0.0],
+        [-0.5, 0.0, 0.0],
+        [f64::NAN; 3],
+        [0.5, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+    ];
+    let colors = [
+        egui::Color32::RED,
+        egui::Color32::WHITE,
+        egui::Color32::WHITE,
+        egui::Color32::GREEN,
+    ];
+    let build = |ui: &mut egui::Ui| {
+        Plot::new("styles-indexing")
+            .width(600.0)
+            .height(400.0)
+            .depth_cue(false)
+            .show_axes([false; 3])
+            .show_grid(false)
+            .show_frame(false)
+            .show_background(false)
+            .show(ui, |p| {
+                p.line(
+                    Line::new("varying", data.as_slice())
+                        .colors(colors)
+                        .widths([1.0, 2.0, 3.0, 8.0]),
+                )
+            })
+    };
+    let (first, output) = frame(&ctx, vec![], build);
+    assert_eq!(first.rendered_primitives, 2);
+    let geometry = ctx.tessellate(output.shapes, output.pixels_per_point);
+    for expected in [egui::Color32::RED, egui::Color32::GREEN] {
+        assert!(geometry.iter().any(|p| match &p.primitive {
+            egui::epaint::Primitive::Mesh(mesh) =>
+                mesh.vertices.iter().any(|v| v.color == expected),
+            _ => false,
+        }));
+    }
+    let pointer = first
+        .transform
+        .position_from_point([0.75, 0.0, 0.0])
+        .unwrap();
+    let (hovered, _) = frame(&ctx, vec![Event::PointerMoved(pointer)], build);
+    assert_eq!(hovered.hovered_point.unwrap().index, 3);
+}
 #[test]
 fn projection_roundtrip_and_independent_z() {
     for projection in [Projection::Perspective, Projection::Orthographic] {
@@ -654,7 +705,7 @@ fn indexed_surfaces_clip_skip_invalid_faces_and_preserve_opacity() {
             .show(ui, |p| {
                 p.surface(
                     Surface::new("mesh", vertices.as_slice(), indices.as_slice())
-                        .colors(&colors)
+                        .colors(colors.as_slice())
                         .shading(true),
                 )
             })

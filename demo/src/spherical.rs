@@ -86,12 +86,13 @@ pub fn build(p: [f64; 3], time: f64, strength: f64) -> Scene {
         .iter()
         .map(|face| {
             let value = face.iter().map(|&i| values[i as usize]).sum::<f64>() / 3.0;
-            crate::inferno::color(value * 0.5 + 0.5)
+            egui_plot3d::ColorMap::Viridis.color(value * 0.5 + 0.5)
         })
         .collect();
     Scene {
         mesh: Some(IndexedSurface {
             name: "Radial displacement",
+            legend_color: egui_plot3d::ColorMap::Viridis.color(0.65),
             vertices: vertices.into(),
             indices,
             colors,

@@ -61,8 +61,8 @@ pub fn build(p: [f64; 3], time: f64, strength: f64) -> Scene {
                 let c = base + (((i + 1) % STEPS) * SIDES + j) as u32;
                 let d = base + (((i + 1) % STEPS) * SIDES + (j + 1) % SIDES) as u32;
                 indices.extend([[a, b, c], [b, d, c]]);
-                let color =
-                    crate::inferno::color(0.5 + 0.48 * (3.0 * u + offset - time * 0.6).cos());
+                let color = egui_plot3d::ColorMap::Plasma
+                    .color(0.5 + 0.48 * (3.0 * u + offset - time * 0.6).cos());
                 colors.extend([color; 2]);
             }
         }
@@ -70,6 +70,7 @@ pub fn build(p: [f64; 3], time: f64, strength: f64) -> Scene {
     Scene {
         mesh: Some(IndexedSurface {
             name: "Knot surface",
+            legend_color: egui_plot3d::ColorMap::Plasma.color(0.65),
             vertices: vertices.into(),
             indices: indices.into(),
             colors,

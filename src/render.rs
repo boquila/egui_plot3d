@@ -171,6 +171,13 @@ impl PlotItemContext<'_> {
         if !width.is_finite() || width <= 0.0 {
             return;
         }
+        self.polyline_styled(points, |_| (width, color));
+    }
+    pub(crate) fn polyline_styled(
+        &mut self,
+        points: &[[f64; 3]],
+        mut style: impl FnMut(usize) -> (f32, Color32),
+    ) {
         let Some(&first) = points.first() else {
             return;
         };
@@ -178,6 +185,11 @@ impl PlotItemContext<'_> {
         self.primitives.reserve(points.len().saturating_sub(1));
         for (i, pair) in points.windows(2).enumerate() {
             let current = self.transform.project(pair[1].into());
+            let (width, color) = style(i);
+            if !width.is_finite() || width <= 0.0 {
+                previous = current;
+                continue;
+            }
             if let (Some(a), Some(b)) = (previous, current) {
                 self.projected_line(a, b, width, color, i);
             } else if let Some([a, b]) = self.transform.segment(pair[0].into(), pair[1].into()) {

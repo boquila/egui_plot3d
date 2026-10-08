@@ -64,19 +64,7 @@ impl Model {
     pub fn scene(&self, strength: f64) -> Scene {
         static INDICES: OnceLock<Arc<[[u32; 3]]>> = OnceLock::new();
         let indices = INDICES
-            .get_or_init(|| {
-                let mut faces = Vec::new();
-                for y in 0..N - 1 {
-                    for x in 0..N - 1 {
-                        let a = (y * N + x) as u32;
-                        faces.extend([
-                            [a, a + 1, a + N as u32],
-                            [a + 1, a + N as u32 + 1, a + N as u32],
-                        ]);
-                    }
-                }
-                faces.into()
-            })
+            .get_or_init(|| egui_plot3d::SurfaceGrid::triangle_indices([N, N]))
             .clone();
         let vertices: Vec<_> = self
             .u
@@ -93,12 +81,14 @@ impl Model {
         let colors = indices
             .iter()
             .map(|f| {
-                crate::inferno::color(f.iter().map(|&i| self.u[i as usize]).sum::<f64>() / 3.0)
+                egui_plot3d::ColorMap::Mako
+                    .color(f.iter().map(|&i| self.u[i as usize]).sum::<f64>() / 3.0)
             })
             .collect();
         Scene {
             mesh: Some(IndexedSurface {
                 name: "Activation",
+                legend_color: egui_plot3d::ColorMap::Mako.color(0.65),
                 vertices: vertices.into(),
                 indices,
                 colors,

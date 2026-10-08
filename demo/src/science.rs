@@ -1,48 +1,31 @@
 //! Shared gallery plumbing; each model and its explanation live in their own module.
 use eframe::egui::{self, Color32};
-use egui_plot3d::{
-    Arrows, Line, PlotBounds, PlotItem, PlotItemContext, PlotUi, PointBuffer, Points,
-};
+use egui_plot3d::{Arrows, ColorScale, Line, PlotBounds, PlotUi, PointBuffer, Points, SurfaceGrid};
 use std::sync::Arc;
 
 pub const BLUE: Color32 = Color32::from_rgb(70, 160, 215);
 pub const ORANGE: Color32 = Color32::from_rgb(232, 145, 65);
 pub const GREEN: Color32 = Color32::from_rgb(80, 185, 140);
-pub type Triangle = ([[f64; 3]; 3], Color32);
 
 pub struct IndexedSurface {
     pub name: &'static str,
+    pub legend_color: Color32,
     pub vertices: PointBuffer,
     pub indices: Arc<[[u32; 3]]>,
     pub colors: Vec<Color32>,
     pub shading: bool,
     pub bounds: PlotBounds,
 }
-
-#[derive(Clone)]
-pub struct Surface {
-    pub name: &'static str,
-    pub triangles: Arc<Vec<Triangle>>,
-    preview_triangles: Arc<Vec<Triangle>>,
-    pub bounds: PlotBounds,
-}
-impl PlotItem for Surface {
-    fn name(&self) -> &str {
-        self.name
-    }
-    fn bounds(&self) -> PlotBounds {
-        self.bounds
-    }
-    fn color(&self) -> Option<Color32> {
-        self.triangles.first().map(|(_, color)| *color)
-    }
-    fn allow_hover(&self) -> bool {
-        false
-    }
-    fn render(&self, ctx: &mut PlotItemContext<'_>) {
-        ctx.reserve(self.triangles.len());
-        for &(points, color) in self.triangles.iter() {
-            ctx.triangle(points.map(Into::into), color);
+impl IndexedSurface {
+    pub fn from_grid(name: &'static str, grid: &SurfaceGrid, scale: &ColorScale) -> Self {
+        Self {
+            name,
+            legend_color: scale.color(scale.value_at(0.65).unwrap_or(0.0)),
+            vertices: grid.vertices().clone(),
+            indices: grid.indices().clone(),
+            colors: grid.colors(scale),
+            shading: false,
+            bounds: grid.vertices().bounds(),
         }
     }
 }
@@ -51,6 +34,8 @@ pub struct Series {
     pub name: &'static str,
     pub data: PointBuffer,
     pub color: Color32,
+    pub width: f32,
+    pub radius: f32,
 }
 impl Series {
     pub fn new(name: &'static str, data: Vec<[f64; 3]>, color: Color32) -> Self {
@@ -58,12 +43,13 @@ impl Series {
             name,
             data: data.into(),
             color,
+            width: 1.7,
+            radius: 4.0,
         }
     }
 }
 #[derive(Default)]
 pub struct Scene {
-    pub surface: Option<Surface>,
     pub mesh: Option<IndexedSurface>,
     pub lines: Vec<Series>,
     pub dots: Vec<Series>,
@@ -71,10 +57,7 @@ pub struct Scene {
 }
 impl Scene {
     pub fn bounds(&self) -> PlotBounds {
-        let mut bounds = self
-            .surface
-            .as_ref()
-            .map_or(PlotBounds::NOTHING, |s| s.bounds);
+        let mut bounds = PlotBounds::NOTHING;
         for s in self.lines.iter().chain(&self.dots) {
             bounds.merge(s.data.bounds());
         }
@@ -87,20 +70,17 @@ impl Scene {
         if let Some(mesh) = &self.mesh {
             ui.surface(
                 egui_plot3d::Surface::new(mesh.name, &mesh.vertices, mesh.indices.as_ref())
-                    .color(crate::inferno::color(0.65))
+                    .color(mesh.legend_color)
                     .colors(&mesh.colors)
                     .shading(mesh.shading),
             );
-        }
-        if let Some(surface) = &self.surface {
-            ui.add(surface.clone());
         }
         for (i, s) in self.lines.iter().enumerate() {
             ui.line(
                 Line::new(s.name, &s.data)
                     .id(("line", i))
                     .color(s.color)
-                    .width(1.7),
+                    .width(s.width),
             );
         }
         for (i, s) in self.dots.iter().enumerate() {
@@ -108,7 +88,7 @@ impl Scene {
                 Points::new(s.name, &s.data)
                     .id(("dots", i))
                     .color(s.color)
-                    .radius(4.0),
+                    .radius(s.radius),
             );
         }
         if let Some((origins, tips)) = &self.arrows {
@@ -153,28 +133,6 @@ impl Scene {
             }
             shapes.push(egui::Shape::mesh(mesh));
         }
-        if let Some(surface) = &self.surface {
-            let mut triangles: Vec<_> = surface
-                .preview_triangles
-                .iter()
-                .filter_map(|&(points, color)| {
-                    let [Some(a), Some(b), Some(c)] = points.map(|p| t.project(p.into())) else {
-                        return None;
-                    };
-                    Some(([a.0, b.0, c.0], color, a.1 + b.1 + c.1))
-                })
-                .collect();
-            triangles.sort_unstable_by(|a, b| b.2.total_cmp(&a.2));
-            let mut mesh = egui::Mesh::default();
-            for (points, color, _) in triangles {
-                let base = mesh.vertices.len() as u32;
-                for pos in points {
-                    mesh.colored_vertex(pos, color);
-                }
-                mesh.add_triangle(base, base + 1, base + 2);
-            }
-            shapes.push(egui::Shape::mesh(mesh));
-        }
         for s in &self.lines {
             for path in s
                 .data
@@ -200,6 +158,26 @@ impl Scene {
     }
 }
 
+pub struct Example {
+    pub title: &'static str,
+    pub name: &'static str,
+    pub tags: &'static [&'static str],
+    pub source: &'static str,
+    pub description: &'static str,
+    pub reference: &'static str,
+}
+macro_rules! example {
+    ($module:ident, $title:literal, $tags:expr, $reference:literal) => {
+        Example {
+            title: $title,
+            name: stringify!($module),
+            tags: $tags,
+            source: include_str!(concat!(stringify!($module), ".rs")),
+            description: crate::$module::DESCRIPTION,
+            reference: $reference,
+        }
+    };
+}
 pub struct Science {
     pub kind: usize,
     pub params: [f64; 3],
@@ -212,67 +190,65 @@ pub struct Science {
     pub scene: Scene,
     preview: Option<(egui::Rect, Vec<egui::Shape>)>,
     reaction: Option<crate::spirals::Model>,
+    neural: Option<crate::neural::Model>,
+    neural_input: [f64; 2],
 }
 impl Science {
-    pub const TITLES: [&'static str; 8] = [
-        "Wave interference",
-        "Kepler orbits",
-        "Correlated Gaussian",
-        "Harmonic motion",
-        "Magnetic dipole",
-        "Spherical harmonics",
-        "Spiral waves",
-        "Torus knots",
-    ];
-    pub const NAMES: [&'static str; 8] = [
-        "waves",
-        "kepler",
-        "gaussian",
-        "harmonics",
-        "dipole",
-        "spherical",
-        "spirals",
-        "knots",
-    ];
-    pub const TAGS: [&'static [&'static str]; 8] = [
-        &["surface", "waves"],
-        &["orbit", "astronomy"],
-        &["surface", "statistics"],
-        &["lines", "frequencies"],
-        &["vectors", "magnetism"],
-        &["surface", "modes"],
-        &["surface", "excitable media"],
-        &["surface", "topology"],
-    ];
-    pub const SOURCES: [&'static str; 8] = [
-        include_str!("waves.rs"),
-        include_str!("kepler.rs"),
-        include_str!("gaussian.rs"),
-        include_str!("harmonics.rs"),
-        include_str!("dipole.rs"),
-        include_str!("spherical.rs"),
-        include_str!("spirals.rs"),
-        include_str!("knots.rs"),
-    ];
-    pub const DESCRIPTIONS: [&'static str; 8] = [
-        crate::waves::DESCRIPTION,
-        crate::kepler::DESCRIPTION,
-        crate::gaussian::DESCRIPTION,
-        crate::harmonics::DESCRIPTION,
-        crate::dipole::DESCRIPTION,
-        crate::spherical::DESCRIPTION,
-        crate::spirals::DESCRIPTION,
-        crate::knots::DESCRIPTION,
-    ];
-    pub const REFERENCES: [&'static str; 8] = [
-        "https://openstax.org/books/university-physics-volume-1/pages/16-5-interference-of-waves",
-        "https://science.nasa.gov/solar-system/orbits-and-keplers-laws/",
-        "https://mathworld.wolfram.com/BivariateNormalDistribution.html",
-        "https://mathworld.wolfram.com/LissajousCurve.html",
-        "https://farside.ph.utexas.edu/teaching/jk1/Electromagnetism/node52.html",
-        "https://dlmf.nist.gov/14.30",
-        "https://www.scholarpedia.org/article/Barkley_model",
-        "https://mathworld.wolfram.com/TorusKnot.html",
+    pub const EXAMPLES: [Example; 9] = [
+        example!(
+            waves,
+            "Wave interference",
+            &["surface", "waves"],
+            "https://openstax.org/books/university-physics-volume-1/pages/16-5-interference-of-waves"
+        ),
+        example!(
+            kepler,
+            "Kepler orbits",
+            &["orbit", "astronomy"],
+            "https://science.nasa.gov/solar-system/orbits-and-keplers-laws/"
+        ),
+        example!(
+            gaussian,
+            "Correlated Gaussian",
+            &["surface", "statistics"],
+            "https://mathworld.wolfram.com/BivariateNormalDistribution.html"
+        ),
+        example!(
+            harmonics,
+            "Harmonic motion",
+            &["lines", "frequencies"],
+            "https://mathworld.wolfram.com/LissajousCurve.html"
+        ),
+        example!(
+            dipole,
+            "Magnetic dipole",
+            &["vectors", "magnetism"],
+            "https://farside.ph.utexas.edu/teaching/jk1/Electromagnetism/node52.html"
+        ),
+        example!(
+            spherical,
+            "Spherical harmonics",
+            &["surface", "modes"],
+            "https://dlmf.nist.gov/14.30"
+        ),
+        example!(
+            spirals,
+            "Spiral waves",
+            &["surface", "excitable media"],
+            "https://www.scholarpedia.org/article/Barkley_model"
+        ),
+        example!(
+            knots,
+            "Torus knots",
+            &["surface", "topology"],
+            "https://mathworld.wolfram.com/TorusKnot.html"
+        ),
+        example!(
+            neural,
+            "Tiny neural network",
+            &["network", "learning"],
+            "https://arxiv.org/abs/1412.6980"
+        ),
     ];
     fn defaults(kind: usize) -> [f64; 3] {
         match kind {
@@ -283,7 +259,8 @@ impl Science {
             4 => [20.0, 8.0, 0.0],
             5 => [4.0, 3.0, 0.85],
             6 => [0.75, 0.02, 0.02],
-            _ => [2.0, 3.0, 0.20],
+            7 => [2.0, 3.0, 0.20],
+            _ => [0.02, 0.22, 1.0],
         }
     }
     pub fn new(kind: usize) -> Self {
@@ -299,6 +276,8 @@ impl Science {
             scene: Scene::default(),
             preview: None,
             reaction: None,
+            neural: None,
+            neural_input: [0.3, 0.2],
         };
         s.rebuild();
         s
@@ -316,12 +295,18 @@ impl Science {
                 0.9
             } else if kind == 1 {
                 1.25
-            } else if matches!(kind, 0 | 2 | 6) {
+            } else if matches!(kind, 0 | 2 | 6 | 8) {
                 0.75
             } else {
                 0.45
             },
-            zoom: if matches!(kind, 5 | 7) { 1.15 } else { 1.0 },
+            zoom: if kind == 8 {
+                1.05
+            } else if matches!(kind, 5 | 7) {
+                1.15
+            } else {
+                1.0
+            },
             ..Default::default()
         }
     }
@@ -340,6 +325,7 @@ impl Science {
             0 => ["x", "y", "amplitude"],
             2 => ["x", "y", "density"],
             6 => ["x", "y", "activation"],
+            8 => ["input x", "input y", "P(inside)"],
             _ => ["x", "y", "z"],
         }
     }
@@ -380,10 +366,15 @@ impl Science {
                 ("Threshold b", 0.01..=0.07),
                 ("Epsilon", 0.02..=0.08),
             ],
-            _ => [
+            7 => [
                 ("Toroidal turns", 1.0..=7.0),
                 ("Poloidal turns", 1.0..=7.0),
                 ("Tube radius", 0.08..=0.24),
+            ],
+            _ => [
+                ("Learning rate", 0.003..=0.04),
+                ("Ring width", 0.10..=0.35),
+                ("Seed", 1.0..=20.0),
             ],
         };
         let mut changed = false;
@@ -403,6 +394,7 @@ impl Science {
                     if self.kind == 3
                         || (self.kind == 4 && i == 1)
                         || (matches!(self.kind, 5 | 7) && i < 2)
+                        || (self.kind == 8 && i == 2)
                     {
                         slider.integer()
                     } else {
@@ -423,6 +415,7 @@ impl Science {
             self.motion_speed = 1.0;
             self.motion_strength = 1.0;
             self.reaction = None;
+            self.neural = None;
             changed = true;
         }
         if self.has_value_animation() {
@@ -437,15 +430,27 @@ impl Science {
                 .add(egui::Slider::new(&mut self.motion_strength, 0.0..=1.0).text("Intensity"))
                 .changed();
         }
+        if self.kind == 8 {
+            ui.add(
+                egui::Slider::new(&mut self.motion_speed, 0.1..=3.0)
+                    .text("Training speed")
+                    .suffix("x"),
+            );
+        }
         if changed {
             self.rebuild();
         }
     }
     pub fn toolbar(&mut self, ui: &mut egui::Ui) {
+        if self.kind == 8 {
+            ui.strong("Learn which points are inside the ring");
+            return;
+        }
         if ui.button("Compare setting").clicked() {
-            let alternatives = [1.0, 0.0, -0.65, 4.0, 75.0, 6.0, 0.85, 3.0];
-            let d = Self::defaults(self.kind)[0];
-            self.params[0] = if (self.params[0] - d).abs() < 1e-6 {
+            let alternatives = [1.0, 0.0, -0.65, 4.0, 75.0, 6.0, 0.85, 3.0, 5.0];
+            let parameter = if self.kind == 8 { 1 } else { 0 };
+            let d = Self::defaults(self.kind)[parameter];
+            self.params[parameter] = if (self.params[parameter] - d).abs() < 1e-6 {
                 alternatives[self.kind]
             } else {
                 d
@@ -473,7 +478,8 @@ impl Science {
             4 => format!("Tilt: {:.0}°", self.params[0]),
             5 => format!("l = {:.0}, m = {:.0}", self.params[0], self.params[1]),
             6 => "Barkley model · Z ×2.4".to_owned(),
-            _ => format!("({:.0}, {:.0})", self.params[0], self.params[1]),
+            7 => format!("({:.0}, {:.0})", self.params[0], self.params[1]),
+            _ => "2–8–8–1".to_owned(),
         });
     }
     fn has_value_animation(&self) -> bool {
@@ -486,10 +492,15 @@ impl Science {
             4 => "Rotate the dipole and vary the sampled field-line radii.",
             5 => "Oscillate a spherical harmonic mode.",
             6 => "Evolve activation and recovery; intensity controls the height.",
-            _ => "Send deformation waves along the tubes.",
+            7 => "Send deformation waves along the tubes.",
+            _ => "Train with backpropagation and Adam; show live activations for the pink probe.",
         }
     }
     pub fn motion_toolbar(&mut self, ui: &mut egui::Ui) {
+        if self.kind == 8 {
+            self.neural_toolbar(ui);
+            return;
+        }
         if !self.has_value_animation() {
             return;
         }
@@ -506,8 +517,80 @@ impl Science {
             }
         });
     }
+
+    fn neural_toolbar(&mut self, ui: &mut egui::Ui) {
+        let steps = self.neural.as_ref().map_or(0, |m| m.steps);
+        ui.horizontal_wrapped(|ui| {
+            let label = if self.animate_values {
+                "Pause training"
+            } else if steps == 0 {
+                "Start training"
+            } else {
+                "Resume training"
+            };
+            if ui.button(label).clicked() {
+                self.animate_values = !self.animate_values;
+            }
+            if ui
+                .add_enabled(!self.animate_values, egui::Button::new("One update"))
+                .clicked()
+            {
+                self.neural.as_mut().unwrap().step_once();
+                self.rebuild();
+            }
+            if ui.button("Reset training").clicked() {
+                self.reset_motion();
+            }
+        });
+        if let Some(model) = &self.neural {
+            ui.label(if model.steps == 0 {
+                "Ready: random weights. Press Start training.".to_owned()
+            } else {
+                format!(
+                    "{} · {} updates",
+                    if self.animate_values {
+                        "Training"
+                    } else {
+                        "Paused"
+                    },
+                    model.steps
+                )
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!("Training accuracy: {:.0}%", model.accuracy * 100.0))
+                    .on_hover_text("Correct classifications among the 256 training examples. This is not a test-set score.");
+                ui.label(format!("Loss: {:.3}", model.loss)).on_hover_text("Binary cross-entropy: how wrong the predictions are. Lower is better.");
+            });
+        }
+        ui.label("Dots = fixed answers (0 or 1). Surface height = predicted probability.");
+        ui.label("Training moves the surface toward the dots. Click a dot to inspect its input.");
+        if ui.ctx().content_rect().width() < 1024.0 {
+            ui.collapsing("See examples & network", |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height(320.0)
+                    .show(ui, |ui| self.neural_inspector(ui));
+            });
+        }
+    }
+
+    pub fn neural_inspector(&mut self, ui: &mut egui::Ui) {
+        if let Some(model) = &self.neural
+            && crate::neural_view::inspector(ui, model, &mut self.neural_input)
+        {
+            self.rebuild();
+        }
+    }
+
+    pub fn select_neural_input(&mut self, point: [f64; 3]) {
+        self.neural_input = [point[0].clamp(-1.0, 1.0), point[1].clamp(-1.0, 1.0)];
+        self.rebuild();
+    }
     pub fn animation_bounds(&self) -> Option<PlotBounds> {
         match self.kind {
+            0 => Some(PlotBounds::from_min_max(
+                [-4.0, -4.0, -2.0],
+                [4.0, 4.0, 2.0],
+            )),
             3 => Some(PlotBounds::from_min_max([-1.6; 3], [1.6; 3])),
             4 => Some(PlotBounds::from_min_max([-4.4; 3], [4.4; 3])),
             5 => Some(PlotBounds::from_min_max([-3.2; 3], [3.2; 3])),
@@ -519,6 +602,7 @@ impl Science {
                 [-3.6, -3.6, -1.7],
                 [3.6, 3.6, 1.7],
             )),
+            8 => Some(crate::neural::bounds()),
             _ => None,
         }
     }
@@ -526,6 +610,7 @@ impl Science {
         self.animate_values = false;
         self.value_time = 0.0;
         self.reaction = None;
+        self.neural = None;
         self.rebuild();
     }
     pub fn update(&mut self, dt: f32) {
@@ -535,6 +620,9 @@ impl Science {
         if self.animate_values {
             self.value_time += dt as f64 * self.motion_speed;
             if let Some(model) = &mut self.reaction {
+                model.advance(dt as f64 * self.motion_speed);
+            }
+            if let Some(model) = &mut self.neural {
                 model.advance(dt as f64 * self.motion_speed);
             }
         }
@@ -600,57 +688,22 @@ impl Science {
                 }
                 self.reaction.as_ref().unwrap().scene(self.motion_strength)
             }
-            _ => crate::knots::build(self.params, self.value_time, self.motion_strength),
+            7 => crate::knots::build(self.params, self.value_time, self.motion_strength),
+            _ => {
+                if self
+                    .neural
+                    .as_ref()
+                    .is_none_or(|m| m.params[1..] != self.params[1..])
+                {
+                    self.animate_values = false;
+                    self.neural = Some(crate::neural::Model::new(self.params));
+                }
+                let model = self.neural.as_mut().unwrap();
+                model.params[0] = self.params[0];
+                model.scene(self.neural_input)
+            }
         };
     }
-}
-
-pub fn surface(
-    name: &'static str,
-    extent: f64,
-    n: usize,
-    f: impl Fn(f64, f64) -> f64,
-    color: impl Fn(f64) -> Color32,
-) -> Surface {
-    let vertices: Vec<_> = (0..n * n)
-        .map(|i| {
-            let x = extent * (2.0 * (i % n) as f64 / (n - 1) as f64 - 1.0);
-            let y = extent * (2.0 * (i / n) as f64 / (n - 1) as f64 - 1.0);
-            [x, y, f(x, y)]
-        })
-        .collect();
-    let bounds = PointBuffer::from(vertices.clone()).bounds();
-    let triangulate = |step: usize| {
-        let mut triangles = Vec::new();
-        for y in (0..n - 1).step_by(step) {
-            for x in (0..n - 1).step_by(step) {
-                let x1 = (x + step).min(n - 1);
-                let y1 = (y + step).min(n - 1);
-                for indices in [
-                    [y * n + x, y * n + x1, y1 * n + x],
-                    [y * n + x1, y1 * n + x1, y1 * n + x],
-                ] {
-                    let p = indices.map(|i| vertices[i]);
-                    triangles.push((p, color(p.iter().map(|p| p[2]).sum::<f64>() / 3.0)));
-                }
-            }
-        }
-        Arc::new(triangles)
-    };
-    Surface {
-        name,
-        triangles: triangulate(1),
-        preview_triangles: triangulate(2),
-        bounds,
-    }
-}
-pub fn gradient(t: f64) -> Color32 {
-    let t = t.clamp(0.0, 1.0);
-    Color32::from_rgb(
-        (BLUE.r() as f64 * (1.0 - t) + ORANGE.r() as f64 * t) as u8,
-        (BLUE.g() as f64 * (1.0 - t) + ORANGE.g() as f64 * t) as u8,
-        (BLUE.b() as f64 * (1.0 - t) + ORANGE.b() as f64 * t) as u8,
-    )
 }
 
 #[cfg(test)]
@@ -660,11 +713,6 @@ mod animation_tests {
         let mut result: Vec<[f64; 3]> = Vec::new();
         if let Some(mesh) = &scene.mesh {
             result.extend(mesh.vertices.as_slice());
-        }
-        if let Some(surface) = &scene.surface {
-            for (triangle, _) in surface.triangles.iter() {
-                result.extend(triangle);
-            }
         }
         for series in &scene.lines {
             result.extend(series.data.as_slice());
@@ -711,6 +759,46 @@ mod animation_tests {
             model.reset_motion();
             assert_eq!(initial, vertices(&model.scene));
         }
+    }
+    #[test]
+    fn neural_training_is_explicit_and_inspection_never_trains() {
+        let mut example = Science::new(8);
+        let initial = vertices(&example.scene);
+        let truth: Vec<_> = example.scene.dots[..2]
+            .iter()
+            .map(|s| s.data.as_slice().to_vec())
+            .collect();
+        assert!(!example.animate_values);
+        example.update(1.0);
+        assert_eq!(example.neural.as_ref().unwrap().steps, 0);
+        assert_eq!(vertices(&example.scene), initial);
+        example.animate_values = true;
+        example.update(1.0);
+        let steps = example.neural.as_ref().unwrap().steps;
+        assert_eq!(steps, 60);
+        assert_ne!(vertices(&example.scene), initial);
+        for (series, expected) in example.scene.dots[..2].iter().zip(&truth) {
+            assert_eq!(series.data.as_slice(), expected);
+        }
+        example.animate_values = false;
+        example.update(1.0);
+        example.select_neural_input([-0.7, 0.4, 0.0]);
+        assert_eq!(example.neural.as_ref().unwrap().steps, steps);
+        example.neural.as_mut().unwrap().step_once();
+        assert_eq!(example.neural.as_ref().unwrap().steps, steps + 1);
+        // Learning-rate edits preserve learned weights; dataset edits reset and pause.
+        example.params[0] = 0.01;
+        example.rebuild();
+        assert_eq!(example.neural.as_ref().unwrap().steps, steps + 1);
+        example.animate_values = true;
+        example.params[1] = 0.30;
+        example.rebuild();
+        assert_eq!(example.neural.as_ref().unwrap().steps, 0);
+        assert!(!example.animate_values);
+        example.params = Science::defaults(8);
+        example.neural_input = [0.3, 0.2];
+        example.reset_motion();
+        assert_eq!(vertices(&example.scene), initial);
     }
     #[test]
     fn spiral_animation_is_live_and_resettable() {

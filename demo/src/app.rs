@@ -32,7 +32,7 @@ impl Gallery {
         Self {
             cloud: Cloud::default(),
             lorenz: Lorenz::default(),
-            science: (0..Science::TITLES.len()).map(Science::new).collect(),
+            science: (0..Science::EXAMPLES.len()).map(Science::new).collect(),
             selected: None,
             grid: true,
             axes: true,
@@ -42,7 +42,7 @@ impl Gallery {
             orthographic: false,
             spin: false,
             reset: false,
-            camera: (0..Science::TITLES.len() + 2)
+            camera: (0..Science::EXAMPLES.len() + 2)
                 .map(|i| {
                     if i < 2 {
                         Camera::default()
@@ -60,7 +60,7 @@ impl Gallery {
         } else if index == 1 {
             "Lorenz attractor"
         } else {
-            Science::TITLES[index - 2]
+            Science::EXAMPLES[index - 2].title
         }
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -68,9 +68,9 @@ impl Gallery {
         self.selected = match name {
             "points" => Some(0),
             "lorenz" => Some(1),
-            _ => Science::NAMES
+            _ => Science::EXAMPLES
                 .iter()
-                .position(|&n| n == name)
+                .position(|example| example.name == name)
                 .map(|i| i + 2),
         };
         self
@@ -82,7 +82,7 @@ impl Gallery {
         } else if index == 1 {
             &["3D", "lines", "dynamics"]
         } else {
-            Science::TAGS[index - 2]
+            Science::EXAMPLES[index - 2].tags
         }
     }
 
@@ -175,28 +175,43 @@ impl Gallery {
         }
     }
 
-    fn info_panel(&self, ui: &mut egui::Ui, index: usize) {
+    fn info_panel(&mut self, ui: &mut egui::Ui, index: usize) {
         egui::Panel::right("info_panel")
             .resizable(true)
             .default_size(600.0)
             .show(ui, |ui| {
                 ui.label(RichText::new(Self::title(index)).heading());
                 ui.separator();
+                if index == 10 {
+                    ScrollArea::vertical().show(ui, |ui| {
+                        ui.label(crate::neural::DESCRIPTION);
+                        ui.add_space(8.0);
+                        self.science[8].neural_inspector(ui);
+                        ui.separator();
+                        ui.collapsing("Rust source", |ui| {
+                            let theme = egui_extras::syntax_highlighting::CodeTheme::from_style(ui.style());
+                            ScrollArea::horizontal().show(ui, |ui| {
+                                egui_extras::syntax_highlighting::code_view_ui(ui, &theme, Science::EXAMPLES[8].source, "rs");
+                            });
+                        });
+                    });
+                    return;
+                }
                 ui.label(RichText::new(if index == 0 {
                     "Five point clusters. Drag to orbit, right-drag to pan, scroll to zoom. Click a point to inspect it."
                 } else if index == 1 {
                     "A chaotic trail drawn from (1, 1, 1). Animate values varies the system parameters; nearby initial conditions reveal divergence."
                 } else {
-                    Science::DESCRIPTIONS[index-2]
+                    Science::EXAMPLES[index-2].description
                 }).line_height(Some(20.0)));
-                if index>=2 { ui.hyperlink_to("Reference",Science::REFERENCES[index-2]); }
+                if index>=2 { ui.hyperlink_to("Reference",Science::EXAMPLES[index-2].reference); }
                 ui.separator();
-                let name = if index == 0 { "cloud" } else if index == 1 { "lorenz" } else {Science::NAMES[index-2]};
+                let name = if index == 0 { "cloud" } else if index == 1 { "lorenz" } else {Science::EXAMPLES[index-2].name};
                 ui.horizontal(|ui| {
                     ui.label("Source");
                     ui.hyperlink_to(format!("{GITHUB} GitHub"), format!("{GITHUB_URL}/blob/main/demo/src/{name}.rs"));
                 });
-                let source = if index == 0 { include_str!("cloud.rs") } else if index == 1 { include_str!("lorenz.rs") } else {Science::SOURCES[index-2]};
+                let source = if index == 0 { include_str!("cloud.rs") } else if index == 1 { include_str!("lorenz.rs") } else {Science::EXAMPLES[index-2].source};
                 ScrollArea::both().show(ui, |ui| {
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                     let theme = egui_extras::syntax_highlighting::CodeTheme::from_style(ui.style());
@@ -222,7 +237,7 @@ impl Gallery {
                 ui.checkbox(&mut self.frame, "Bounding box");
                 ui.checkbox(&mut self.equal, "Equal axis scale");
                 ui.add_enabled(
-                    !matches!(index, 2 | 7..=9),
+                    !matches!(index, 2 | 7..=10),
                     egui::Checkbox::new(&mut self.depth, "Depth shading"),
                 )
                 .on_disabled_hover_text("This surface supplies its own colors and shading.");
@@ -302,7 +317,7 @@ impl Gallery {
                 .show_axes([self.axes; 3])
                 .show_frame(self.frame)
                 .equal_axis_scale(self.equal)
-                .depth_cue(self.depth && !matches!(index, 2 | 7..=9))
+                .depth_cue(self.depth && !matches!(index, 2 | 7..=10))
                 .legend(Legend::default());
             if index == 1 {
                 plot = plot.default_bounds(self.lorenz.bounds());
@@ -330,6 +345,11 @@ impl Gallery {
                 }
             });
             self.camera[index] = response.transform.camera();
+            if index == 10
+                && let Some(h) = &response.clicked_point
+            {
+                self.science[8].select_neural_input(h.position.to_array());
+            }
             if index == 0
                 && let Some(h) = response.clicked_point
             {

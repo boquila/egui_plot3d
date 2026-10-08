@@ -22,7 +22,7 @@ While working locally, depend on this repository with
 
 The gallery follows the reference `ref/egui_plot/demo`: default egui light/dark themes, a resizable example thumbnail panel, the interactive plot, and a source panel with Rust syntax highlighting. The small HTML/CSS shell hosts the canvas; egui draws the application UI.
 
-It contains ten interactive examples:
+It contains eleven interactive examples:
 
 1. **Points in space** — 100–100,000 deterministic samples in five clusters, point inspection, adjustable density/radius, and cluster visibility. Inspired by the interaction and camera in `../boquilahub/src/gui/embedding_plot_3d.rs`.
 2. **Lorenz attractor** — a 3D trajectory integrated with fourth-order Runge–Kutta, adjustable system parameters, and a second trajectory starting at a nearby initial condition. **Draw trajectory** starts empty and integrates forward from (1, 1, 1), leaving a trail behind the ball. Pause/resume, restart, and drawing speed controls let you watch the attractor form. **Animate values** varies sigma, rho, and beta smoothly while integrating new samples; the existing trail preserves the system's history. This mode illustrates a driven Lorenz system with time-varying parameters. The camera bounds remain fixed during drawing.
@@ -33,13 +33,15 @@ It contains ten interactive examples:
 6. **Harmonic motion** — three sinusoidal coordinates form a closed 3D Lissajous curve. Change frequency ratios and compare its coordinate projections.
 7. **Magnetic dipole** — field lines and direction arrows around a tilted ideal dipole. Explore the polar and equatorial field directions.
 
-8. **Spherical harmonics** — an oscillating sphere reveals the lobes and nodal patterns of real [spherical harmonics](https://dlmf.nist.gov/14.30). Change degree and order; Inferno colors encode signed displacement.
-9. **Spiral waves** — a live [Barkley reaction–diffusion model](https://www.scholarpedia.org/article/Barkley_model) develops curling excitation fronts. Height and Inferno color show activation; change excitability and recovery to reshape the waves.
-10. **Torus knots** — animated tubes reveal how winding numbers produce [knots](https://mathworld.wolfram.com/TorusKnot.html) and links. Compare a trefoil with linked loops, or choose your own winding numbers.
+8. **Spherical harmonics** — an oscillating sphere reveals the lobes and nodal patterns of real [spherical harmonics](https://dlmf.nist.gov/14.30). Change degree and order; Viridis colors encode signed displacement.
+9. **Spiral waves** — a live [Barkley reaction–diffusion model](https://www.scholarpedia.org/article/Barkley_model) develops curling excitation fronts. Height and Mako color show activation; change excitability and recovery to reshape the waves.
+10. **Torus knots** — Plasma-colored animated tubes reveal how winding numbers produce [knots](https://mathworld.wolfram.com/TorusKnot.html) and links. Compare a trefoil with linked loops, or choose your own winding numbers.
 
-Each science example has a **Compare setting** button, parameter controls, Rust source, and a model reference. The Gaussian uses an 8x vertical scale; spiral activation uses 2.4x. The new surfaces use the library's indexed `Surface` item, sharing vertices across triangles. Thumbnails are cached.
+11. **Tiny neural network** — a 2–8–8–1 classifier with 105 weights and biases learns which coordinates lie inside a ring. It starts untrained and paused: press **Start training**, **Pause training**, **One update**, or **Reset training**. The 3D surface shows predicted probability on a real 0–1 axis; labeled dots stay fixed at their correct answers, 0 or 1. Select a point on the example map, a plot dot, or the x/y sliders to inspect its forward pass in a separate layer diagram. Selecting inputs never changes weights. A contour marks the learned 50% decision boundary around the ring. Training uses all 256 examples per update, stable binary cross-entropy, backpropagation, and [Adam](https://arxiv.org/abs/1412.6980), entirely in Rust. Accuracy is explicitly measured on the training set. Changing ring width or seed resets and pauses learning; learning-rate edits preserve weights. Numerical gradient checks cover both initial and trained weights, and regression tests cover saturated loss, fixed labels, and training controls.
 
-Value animations are enabled by default on Lorenz, Wave interference, Harmonic motion, Magnetic dipole, and all three new plots, and advance when that example is selected. Lorenz draws from its initial condition; use **Pause** to inspect the growing trail or uncheck **Draw trajectory** to show the complete classic trajectory. The other animated examples freeze when **Animate values** is unchecked; **Reset motion** restores their initial state and pauses them.
+Each science example has a **Compare setting** button, parameter controls, Rust source, and a model reference. The Gaussian uses an 8x vertical scale; spiral activation uses 2.4x. All surfaces use the library's indexed `Surface` item, sharing vertices across triangles. Wave and Gaussian sampling, neural decision contours, palette interpolation, and color keys use the public plotting API. Thumbnails are cached. Viridis and Plasma use the original CC0 tables; Mako uses the seaborn table with its [BSD license](src/colormap-LICENSE).
+
+Value animations are enabled by default on Lorenz, Wave interference, Harmonic motion, Magnetic dipole, Spherical harmonics, Spiral waves, and Torus knots, and advance when that example is selected. Lorenz draws from its initial condition; use **Pause** to inspect the growing trail or uncheck **Draw trajectory** to show the complete classic trajectory. The other animated examples freeze when **Animate values** is unchecked; **Reset motion** restores their initial state and pauses them.
 
 **Animate values** on Wave interference, Harmonic motion, and Magnetic dipole continuously changes the plotted geometry. Waves vary phase, wavelength, and source separation; harmonic curves morph through changing phases, amplitudes, and higher harmonics; dipole snapshots precess and vary the radii of sampled field lines. **Parameters** contains speed and intensity controls. Uncheck the toggle to freeze the current shape, or use **Reset motion** to restore the base values. Harmonic and dipole bounds stay fixed so the animation does not move the camera. The dipole animation illustrates changing orientation and field-line sampling, not a time-dependent electromagnetic simulation. Particle motion and wave travel remain separate controls.
 
@@ -51,7 +53,7 @@ Run natively:
 cargo run --release -p egui_plot3d_demo
 ```
 
-Append `-- points`, `-- lorenz`, `-- waves`, `-- kepler`, `-- gaussian`, `-- harmonics`, `-- dipole`, `-- spherical`, `-- spirals`, or `-- knots` to open an example directly.
+Append `-- points`, `-- lorenz`, `-- waves`, `-- kepler`, `-- gaussian`, `-- harmonics`, `-- dipole`, `-- spherical`, `-- spirals`, `-- knots`, or `-- neural` to open an example directly.
 
 Run in a browser (install [Trunk](https://trunkrs.dev/) first):
 
@@ -62,6 +64,33 @@ trunk serve --release
 ```
 
 Open `http://localhost:8080` and select a thumbnail. If your environment sets `NO_COLOR=1`, unset it or set it to `true` for Trunk 0.21.14.
+
+## Composable surfaces and styles
+
+Build a surface, extract contours, and use one scale for the geometry and its color key:
+
+```rust
+use egui_plot3d::{ColorBar, ColorMap, ColorScale, Line, Plot, PlotItem, SurfaceGrid};
+
+let grid = SurfaceGrid::from_fn(-3.0..=3.0, -3.0..=3.0, [65, 65],
+    |x, y| x.sin() * y.cos());
+let scale = ColorScale::new(-1.0..=1.0, ColorMap::Viridis);
+let surface = grid.surface("Height").color_by(|p| p.z, &scale);
+let contour = Line::new("z = 0.5", grid.contour(0.5)).width(2.0);
+let layers: [&dyn PlotItem; 2] = [&surface, &contour];
+
+Plot::new("field").depth_cue(false).show(ui, |plot| plot.extend(layers));
+ui.add(ColorBar::new("Height", &scale));
+```
+
+- `SurfaceGrid::from_heights` accepts measured row-major grids; `parametric` samples arbitrary 3D surfaces. `resample` replaces coordinates while sharing topology and preserving older snapshots.
+- `contour(level)` intersects the actual triangles with a horizontal plane and returns NaN-separated segments for `Line`. Missing faces are skipped; coplanar triangles have no unique contour and are omitted. Shared contour edges are emitted once.
+- `ColorScale` supports linear/logarithmic domains, reversal, missing values, and custom palettes. Inferno, Viridis, Mako, and Plasma use their original tables. `ColorBar` shares that exact mapping, including logarithmic ticks.
+- Points support per-point radii and colors; lines support per-segment widths and colors. `color_by` maps coordinates through a shared scale. Surface colors average vertex scalar values per face. Quantitative colors should use `.depth_cue(false)` and unshaded surfaces.
+- Color, size, width, and index columns accept borrowed slices, owned vectors, or shared `Arc` slices through `PlotValues`. Segment attributes use the original first-vertex index, including across NaN breaks.
+- `PlotUi::add(&item)` and `extend` support reusable items and heterogeneous borrowed layers, without copying their data.
+
+This adds composable 3D geometry and scales; it does not implement ggplot's statistical transformations, faceting system, or a GPU depth buffer.
 
 ## Interaction
 

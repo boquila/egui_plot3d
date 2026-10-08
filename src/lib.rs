@@ -65,6 +65,32 @@
 //! # });
 //! ```
 //!
+//! # Function surfaces, contours, scales, and reusable layers
+//!
+//! ```
+//! use egui_plot3d::{ColorBar, ColorMap, ColorScale, Line, Plot, PlotItem, SurfaceGrid};
+//! let grid = SurfaceGrid::from_fn(-3.0..=3.0, -3.0..=3.0, [65, 65],
+//!     |x, y| x.sin() * y.cos());
+//! let scale = ColorScale::new(-1.0..=1.0, ColorMap::Viridis);
+//! let surface = grid.surface("Height").color_by(|p| p.z, &scale);
+//! let contour = Line::new("z = 0.5", grid.contour(0.5)).width(2.0);
+//! // Reuse these items without cloning their geometry.
+//! let layers: [&dyn PlotItem; 2] = [&surface, &contour];
+//! # egui::__run_test_ui(|ui| {
+//! Plot::new("field").depth_cue(false).show(ui, |plot| plot.extend(layers));
+//! ui.add(ColorBar::new("Height", &scale));
+//! # });
+//! ```
+//!
+//! [`SurfaceGrid::from_heights`] accepts measured grids, while
+//! [`SurfaceGrid::parametric`] samples arbitrary `(u,v) -> (x,y,z)` functions.
+//! [`SurfaceGrid::resample`] reuses triangle topology during animation.
+//! [`Points::radii`], [`Line::widths`], and item color columns accept borrowed
+//! slices, owned vectors, and shared `Arc` slices through [`PlotValues`].
+//! Color scales support linear or logarithmic domains, custom palettes, reversed
+//! domains, and explicit missing colors. Set [`Plot::depth_cue`] to false when
+//! surface or point colors must retain an exact quantitative meaning.
+//!
 //! # Rendering limits
 //!
 //! Projection and depth sorting run on the CPU. Points are depth-sorted;
@@ -77,14 +103,21 @@
 #![warn(missing_docs)]
 
 mod camera;
+mod color;
+mod colormaps;
 mod data;
+mod grid;
 mod items;
 mod plot;
 mod render;
 mod texture;
+mod values;
 
 pub use camera::{Camera, PlotTransform, Projection};
+pub use color::{ColorBar, ColorMap, ColorScale};
 pub use data::{PlotBounds, PlotPoint, PlotPoints, PointBuffer};
+pub use grid::SurfaceGrid;
 pub use items::{Arrows, Line, MarkerShape, PlotItem, Points, Polygon, Surface, Text};
 pub use plot::{Corner, HoveredPoint, Legend, Plot, PlotResponse, PlotUi};
 pub use render::PlotItemContext;
+pub use values::PlotValues;
