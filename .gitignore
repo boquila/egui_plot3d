@@ -1,2 +1,10 @@
 /target
 /ref
+/demo/dist
+/demo/dist-pages
+/tools
+/artifacts
+/node_modules
+*.py
+*.py[cod]
+__pycache__/
