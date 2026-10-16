@@ -209,7 +209,7 @@ impl Gallery {
                 let name = if index == 0 { "cloud" } else if index == 1 { "lorenz" } else {Science::EXAMPLES[index-2].name};
                 ui.horizontal(|ui| {
                     ui.label("Source");
-                    ui.hyperlink_to(format!("{GITHUB} GitHub"), format!("{GITHUB_URL}/blob/main/demo/src/{name}.rs"));
+                    ui.hyperlink_to(format!("{GITHUB} GitHub"), format!("{GITHUB_URL}/blob/main/examples/demo/src/{name}.rs"));
                 });
                 let source = if index == 0 { include_str!("cloud.rs") } else if index == 1 { include_str!("lorenz.rs") } else {Science::EXAMPLES[index-2].source};
                 ScrollArea::both().show(ui, |ui| {

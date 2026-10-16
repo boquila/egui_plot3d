@@ -40,7 +40,7 @@ pub struct HoveredPoint {
     pub item_id: Id,
     /// Displayed name of the picked item.
     pub name: String,
-    /// Point index, or the first vertex of a line segment.
+    /// Point index, first vertex of a line segment, or original surface face index.
     pub index: usize,
     /// World-space sample or interpolated segment position.
     pub position: PlotPoint,
@@ -50,6 +50,10 @@ pub struct HoveredPoint {
     pub depth: f32,
     /// Distance from the pointer in logical pixels.
     pub distance: f32,
+    /// Weights of the original triangle's three vertices for a surface hit.
+    /// `index` is the original triangle index. `None` for points and segments.
+    /// Use these to interpolate any application-owned vertex attributes.
+    pub barycentric: Option<[f64; 3]>,
 }
 
 /// Result of building and interacting with one plot.
@@ -68,6 +72,8 @@ pub struct PlotResponse<R> {
     pub clicked_point: Option<HoveredPoint>,
     /// Number of visible point/segment/triangle/text primitives after clipping.
     pub rendered_primitives: usize,
+    /// Spatial query snapshot, when requested with [`Plot::capture_picking`].
+    pub picking: Option<crate::PlotPicking>,
 }
 
 #[derive(Clone, Default)]
@@ -77,6 +83,18 @@ struct PlotMemory {
     bounds: PlotBounds,
     manual_bounds: Option<PlotBounds>,
     force_auto_bounds: bool,
+}
+
+#[derive(Clone, PartialEq)]
+pub(crate) struct RenderKey {
+    revision: Id,
+    transform: PlotTransform,
+    clip: Rect,
+    pixels_per_point: f32,
+    depth_cue: bool,
+    hover: bool,
+    capture_picking: bool,
+    items: Vec<(Id, String, Color32, bool, bool)>,
 }
 
 /// Build a plot every frame; camera and legend state persist under its ID.
@@ -93,11 +111,13 @@ pub struct Plot<'label> {
     labels: [String; 3],
     equal_aspect: bool,
     axis_aspect: [f64; 3],
+    up_axis: crate::UpAxis,
     camera: Option<Camera>,
     projection: Option<Projection>,
     reset: bool,
     drag: bool,
     zoom: bool,
+    zoom_to_pointer: bool,
     pan: bool,
     double_click: bool,
     hover: bool,
@@ -108,6 +128,8 @@ pub struct Plot<'label> {
     includes: PlotBounds,
     depth_cue: bool,
     label_formatter: Option<LabelFormatter<'label>>,
+    cache_revision: Option<Id>,
+    capture_picking: bool,
 }
 impl<'label> Plot<'label> {
     /// Create a plot with an ID salt scoped to its parent UI. Use distinct stable salts for separate plots.
@@ -125,11 +147,13 @@ impl<'label> Plot<'label> {
             labels: ["X".into(), "Y".into(), "Z".into()],
             equal_aspect: true,
             axis_aspect: [1.0; 3],
+            up_axis: crate::UpAxis::Z,
             camera: None,
             projection: None,
             reset: false,
             drag: true,
             zoom: true,
+            zoom_to_pointer: false,
             pan: true,
             double_click: true,
             hover: true,
@@ -140,11 +164,32 @@ impl<'label> Plot<'label> {
             includes: PlotBounds::NOTHING,
             depth_cue: true,
             label_formatter: None,
+            cache_revision: None,
+            capture_picking: false,
         }
     }
     /// Override the plot's ID with a globally unique ID, independent of its parent UI.
     pub fn id(mut self, id: Id) -> Self {
         self.explicit_id = Some(id);
+        self
+    }
+    /// Reuse projected geometry, meshes and a spatial picking index while this
+    /// revision is unchanged. Advance it whenever item geometry, attributes or
+    /// custom rendering changes (including marker sizes and surface colors).
+    /// Camera, bounds, viewport, DPI, item identity/visibility and plot depth cues
+    /// invalidate automatically. The build closure still runs every frame.
+    ///
+    /// Omit this for continuously changing data. Pair with [`PointBuffer`](crate::PointBuffer)
+    /// or explicit bounds to avoid scanning coordinates during auto-fitting.
+    pub fn cache_revision(mut self, revision: impl egui::AsId) -> Self {
+        self.cache_revision = Some(Id::new(revision));
+        self
+    }
+    /// Return a spatial query snapshot for custom picking and surface visibility
+    /// tests. Enabled independently of the plot's automatic hover UI. Pair with
+    /// [`Self::cache_revision`] to reuse the index across unchanged frames.
+    pub fn capture_picking(mut self, enabled: bool) -> Self {
+        self.capture_picking = enabled;
         self
     }
     /// Set width in logical pixels. Otherwise use available width, or derive it from height and view aspect.
@@ -177,6 +222,11 @@ impl<'label> Plot<'label> {
         }
         self
     }
+    /// Choose the vertical world axis and floor plane (default Z up).
+    pub fn up_axis(mut self, axis: crate::UpAxis) -> Self {
+        self.up_axis = axis;
+        self
+    }
     /// Preserve equal world units. `false` fits each axis independently.
     pub fn equal_axis_scale(mut self, equal: bool) -> Self {
         self.equal_aspect = equal;
@@ -188,7 +238,7 @@ impl<'label> Plot<'label> {
         self.legend = Some(legend);
         self
     }
-    /// Show the XY grid at the minimum Z bound (default true).
+    /// Show a floor grid at the minimum of the chosen up axis (default true).
     pub fn show_grid(mut self, show: bool) -> Self {
         self.grid = show;
         self
@@ -251,6 +301,11 @@ impl<'label> Plot<'label> {
     /// Allow wheel and pinch zoom while hovering (default true).
     pub fn allow_zoom(mut self, allow: bool) -> Self {
         self.zoom = allow;
+        self
+    }
+    /// Anchor scroll and pinch zoom to the pointer instead of the plot center.
+    pub fn zoom_to_pointer(mut self, enabled: bool) -> Self {
+        self.zoom_to_pointer = enabled;
         self
     }
     /// Alias for [`Self::allow_zoom`]; controls both wheel and pinch zoom.
@@ -397,10 +452,16 @@ impl<'label> Plot<'label> {
         if response.hovered() && self.zoom {
             let scroll = ui.input_mut(|i| std::mem::take(&mut i.smooth_scroll_delta.y));
             let pinch = ui.input(|i| i.zoom_delta());
-            memory.camera.zoom_by((scroll * 0.003).exp() * pinch);
+            let factor = (scroll * 0.003).exp() * pinch;
+            if let Some(position) = response.hover_pos().filter(|_| self.zoom_to_pointer) {
+                memory.camera.zoom_at(factor, position, rect);
+            } else {
+                memory.camera.zoom_by(factor);
+            }
         }
         let make_transform = |bounds, camera| {
-            let transform = PlotTransform::new(rect, bounds, camera, self.equal_aspect);
+            let transform = PlotTransform::new(rect, bounds, camera, self.equal_aspect)
+                .with_up_axis(self.up_axis);
             if self.equal_aspect {
                 transform.with_axis_aspect(self.axis_aspect)
             } else {
@@ -458,6 +519,7 @@ impl<'label> Plot<'label> {
                 hovered_point: None,
                 clicked_point: None,
                 rendered_primitives: 0,
+                picking: None,
             };
         }
         let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
@@ -482,23 +544,78 @@ impl<'label> Plot<'label> {
             .ctx()
             .data_mut(|d| d.remove_temp::<render::RenderScratch>(scratch_id))
             .unwrap_or_default();
-        for (index, item) in plot_ui.items.iter().enumerate() {
-            if memory.hidden.contains(&item.id()) {
-                continue;
+        let key = self.cache_revision.map(|revision| RenderKey {
+            revision,
+            transform: transform.clone(),
+            clip: painter.clip_rect(),
+            pixels_per_point: ui.ctx().pixels_per_point(),
+            depth_cue: self.depth_cue,
+            hover: self.hover,
+            capture_picking: self.capture_picking,
+            items: plot_ui
+                .items
+                .iter()
+                .enumerate()
+                .map(|(i, item)| {
+                    (
+                        item.id(),
+                        item.name().to_owned(),
+                        item.color().unwrap_or_else(|| palette(i)),
+                        item.allow_hover(),
+                        memory.hidden.contains(&item.id()),
+                    )
+                })
+                .collect(),
+        });
+        let rendered_primitives;
+        if key.is_some() && scratch.cache_key == key {
+            painter.extend(scratch.shapes.iter().cloned());
+            hovered = response
+                .hover_pos()
+                .filter(|_| self.hover)
+                .and_then(|p| scratch.picks.pick(p, &transform));
+            rendered_primitives = scratch.count;
+        } else {
+            if std::sync::Arc::strong_count(&scratch.picks) != 1 {
+                scratch.picks = Default::default();
             }
-            item.render(&mut PlotItemContext {
-                transform: &transform,
-                primitives: &mut scratch.primitives,
-                pointer: response.hover_pos(),
-                hovered: &mut hovered,
-                item_id: item.id(),
-                name: item.name(),
-                color: item.color().unwrap_or_else(|| palette(index)),
-                hover: self.hover && item.allow_hover(),
-                depth_cue: self.depth_cue,
-            });
+            let picks = std::sync::Arc::get_mut(&mut scratch.picks).unwrap();
+            picks.clear();
+            let capture = key.is_some() || self.capture_picking;
+            for (index, item) in plot_ui.items.iter().enumerate() {
+                if memory.hidden.contains(&item.id()) {
+                    continue;
+                }
+                let pick_item = if capture {
+                    picks.item(item.id(), item.name())
+                } else {
+                    0
+                };
+                item.render(&mut PlotItemContext {
+                    transform: &transform,
+                    primitives: &mut scratch.primitives,
+                    pointer: response.hover_pos().filter(|_| self.hover),
+                    hovered: &mut hovered,
+                    item_id: item.id(),
+                    name: item.name(),
+                    color: item.color().unwrap_or_else(|| palette(index)),
+                    hover: (self.hover || self.capture_picking) && item.allow_hover(),
+                    depth_cue: self.depth_cue,
+                    pick_scene: if capture { Some(picks) } else { None },
+                    pick_item,
+                    vertices: &mut scratch.vertices,
+                });
+            }
+            if capture {
+                picks.build(painter.clip_rect());
+            }
+            rendered_primitives = render::paint(&painter, &mut scratch);
+            scratch.cache_key = key;
         }
-        let rendered_primitives = render::paint(&painter, &mut scratch);
+        let picking = self.capture_picking.then(|| crate::PlotPicking {
+            scene: scratch.picks.clone(),
+            transform: transform.clone(),
+        });
         ui.ctx().data_mut(|d| d.insert_temp(scratch_id, scratch));
         let mut over_legend = false;
         if let Some(legend) = self.legend {
@@ -609,6 +726,7 @@ impl<'label> Plot<'label> {
             response,
             transform,
             rendered_primitives,
+            picking,
         }
     }
 }

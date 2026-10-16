@@ -22,11 +22,11 @@ jobs:
           version: v0.21.14
       - uses: actions/configure-pages@v5
       - name: Build gallery
-        working-directory: demo
+        working-directory: examples/demo
         run: trunk build --release --locked --public-url "/${{ github.event.repository.name }}/"
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: demo/dist
+          path: examples/demo/dist
   deploy:
     needs: build
     runs-on: ubuntu-latest

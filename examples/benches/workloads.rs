@@ -83,6 +83,16 @@ impl PlotItem for Grid<'_> {
 fn main() {
     println!("CPU frame preparation + tessellation; no GPU, uploads, presentation, or guides");
     let shared = PointBuffer::from(data(100_000, 0.0));
+    measure("100k cached points, hover", true, |ui, _| {
+        plot(0)
+            .cache_revision(0)
+            .show(ui, |p| p.points(Points::new("data", &shared)));
+    });
+    measure("100k cached points, orbit + hover", true, |ui, frame| {
+        plot(frame)
+            .cache_revision(0)
+            .show(ui, |p| p.points(Points::new("data", &shared)));
+    });
     for hover in [false, true] {
         measure(
             if hover {
@@ -158,8 +168,52 @@ fn main() {
             )
         });
     });
+    let surface =
+        egui_plot3d::Surface::new("surface", &grid, indices.as_slice()).color(Color32::LIGHT_BLUE);
+    measure("32,768 cached triangles, hover", true, |ui, _| {
+        plot(0).cache_revision(0).show(ui, |p| p.add(&surface));
+    });
+    let colors: Vec<_> = grid
+        .as_slice()
+        .iter()
+        .map(|p| egui_plot3d::ColorMap::Viridis.color((p[2] + 1.0) * 0.5))
+        .collect();
+    let smooth = egui_plot3d::Surface::new("field", &grid, indices.as_slice())
+        .vertex_colors(colors.as_slice());
+    measure(
+        "32,768 smooth shared triangles, orbit",
+        true,
+        |ui, frame| {
+            plot(frame).depth_cue(false).show(ui, |p| p.add(&smooth));
+        },
+    );
+    measure("32,768 smooth cached triangles, hover", true, |ui, _| {
+        plot(0)
+            .depth_cue(false)
+            .cache_revision(0)
+            .show(ui, |p| p.add(&smooth));
+    });
     if std::env::args().any(|s| s == "--large") {
         let large = PointBuffer::from(data(1_000_000, 0.0));
+        measure(
+            "1M sampled points (4px), orbit + hover",
+            true,
+            |ui, frame| {
+                plot(frame).show(ui, |p| {
+                    p.points(Points::new("data", &large).screen_space_sampling(4.0))
+                });
+            },
+        );
+        measure("1M sampled cached points, hover", true, |ui, _| {
+            plot(0).cache_revision(0).show(ui, |p| {
+                p.points(Points::new("data", &large).screen_space_sampling(4.0))
+            });
+        });
+        measure("1M sampled cached, orbit + hover", true, |ui, frame| {
+            plot(frame).cache_revision(0).show(ui, |p| {
+                p.points(Points::new("data", &large).screen_space_sampling(4.0))
+            });
+        });
         measure("1M points, hover", true, |ui, frame| {
             plot(frame).show(ui, |p| p.points(Points::new("data", &large)));
         });
