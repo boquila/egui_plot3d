@@ -16,6 +16,7 @@ pub(crate) enum Geometry {
         width: f32,
     },
     Triangle([Pos2; 3]),
+    IndexedTriangle([u32; 3]),
     Text(Pos2, String),
 }
 #[derive(Clone)]
@@ -31,6 +32,12 @@ pub(crate) struct RenderScratch {
     keys: Vec<u64>,
     temporary: Vec<u64>,
     meshes: Vec<Arc<Mesh>>,
+    pub(crate) cache_key: Option<crate::plot::RenderKey>,
+    pub(crate) picks: Arc<crate::picking::PickScene>,
+    pub(crate) shapes: Vec<Shape>,
+    pub(crate) count: usize,
+    pub(crate) vertices: Vec<egui::epaint::Vertex>,
+    vertex_map: Vec<u32>,
 }
 impl RenderScratch {
     fn sort(&mut self) {
@@ -78,6 +85,9 @@ pub struct PlotItemContext<'a> {
     pub(crate) color: Color32,
     pub(crate) hover: bool,
     pub(crate) depth_cue: bool,
+    pub(crate) pick_scene: Option<&'a mut crate::picking::PickScene>,
+    pub(crate) pick_item: usize,
+    pub(crate) vertices: &'a mut Vec<egui::epaint::Vertex>,
 }
 impl PlotItemContext<'_> {
     /// Reserve projected geometry storage for a batch.
@@ -94,10 +104,7 @@ impl PlotItemContext<'_> {
     }
     fn push(&mut self, depth: f32, color: Color32, geometry: Geometry) {
         let color = if self.depth_cue {
-            let factor = ((1.3 - depth * 0.09).clamp(0.45, 1.0) * 255.0).round() as u8;
-            let shaded = color.gamma_multiply_u8(factor);
-            // A depth cue dims RGB; it must not turn opaque surfaces transparent.
-            Color32::from_rgba_premultiplied(shaded.r(), shaded.g(), shaded.b(), color.a())
+            depth_color(color, depth)
         } else {
             color
         };
@@ -107,32 +114,25 @@ impl PlotItemContext<'_> {
             geometry,
         });
     }
-    fn pick(&mut self, pos: Pos2, depth: f32, point: PlotPoint, index: usize, radius: f32) {
+    #[inline]
+    fn record_pick(&mut self, shape: crate::picking::PickShape, index: usize) {
         if !self.hover {
             return;
         }
-        let Some(pointer) = self.pointer else {
-            return;
-        };
-        let distance_sq = pointer.distance_sq(pos);
-        if distance_sq > radius.max(5.0).powi(2) {
-            return;
-        }
-        let distance = distance_sq.sqrt();
-        if distance <= radius.max(5.0)
-            && self.hovered.as_ref().is_none_or(|h| {
-                depth < h.depth - 1e-4 || ((depth - h.depth).abs() < 1e-4 && distance < h.distance)
-            })
-        {
-            *self.hovered = Some(HoveredPoint {
-                item_id: self.item_id,
-                name: self.name.to_owned(),
+        if let Some(pointer) = self.pointer
+            && let Some(hit) = shape.hit(
+                pointer,
+                self.transform,
+                self.item_id,
+                self.name,
                 index,
-                position: point,
-                screen_position: pos,
-                depth,
-                distance,
-            });
+                self.hovered.as_ref(),
+            )
+        {
+            crate::picking::choose(self.hovered, hit);
+        }
+        if let Some(scene) = self.pick_scene.as_mut() {
+            scene.push(self.pick_item, index, shape);
         }
     }
     /// Submit a marker. Radius is in logical pixels; index is returned when the sample is picked.
@@ -153,8 +153,109 @@ impl PlotItemContext<'_> {
         if !self.transform.rect.expand(radius).contains(pos) {
             return;
         }
-        self.pick(pos, depth, point, index, radius);
+        self.projected_point(point, pos, depth, radius, shape, color, index);
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn projected_point(
+        &mut self,
+        point: PlotPoint,
+        pos: Pos2,
+        depth: f32,
+        radius: f32,
+        shape: MarkerShape,
+        color: Color32,
+        index: usize,
+    ) {
+        // Avoid constructing a general pick record for every point on the
+        // uncached path; almost all samples are outside the pointer footprint.
+        if self.hover
+            && (self.pick_scene.is_some()
+                || self
+                    .pointer
+                    .is_some_and(|p| p.distance_sq(pos) <= radius.max(5.0).powi(2)))
+        {
+            self.record_pick(
+                crate::picking::PickShape::Point {
+                    position: point,
+                    screen: pos,
+                    depth,
+                    radius,
+                },
+                index,
+            );
+        }
         self.push(depth, color, Geometry::Point { pos, radius, shape });
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn point_cloud(
+        &mut self,
+        points: &[[f64; 3]],
+        shape: MarkerShape,
+        sampling: Option<f32>,
+        perspective: bool,
+        limits: [f32; 2],
+        mut style: impl FnMut(usize) -> (f32, Color32),
+    ) {
+        let rect = self.transform.rect;
+        let cell = sampling
+            .unwrap_or(1.0)
+            .max((rect.width() * rect.height() / 1_000_000.0).sqrt())
+            .max(1.0);
+        let columns = ((rect.width() / cell).ceil() as usize).clamp(1, 1_000_000);
+        let rows = ((rect.height() / cell).ceil() as usize).clamp(1, 1_000_000 / columns);
+        let mut slots = if sampling.is_some() {
+            vec![usize::MAX; columns * rows]
+        } else {
+            Vec::new()
+        };
+        let mut selected: Vec<(usize, Pos2, f32, f32, Color32)> = Vec::new();
+        for (index, &point) in points.iter().enumerate() {
+            let (radius, color) = style(index);
+            if !radius.is_finite() || radius <= 0.0 {
+                continue;
+            }
+            let Some((pos, depth)) = self.transform.project(point.into()) else {
+                continue;
+            };
+            let factor = if perspective
+                && self.transform.camera.projection == crate::Projection::Perspective
+            {
+                4.0 / depth
+            } else {
+                1.0
+            };
+            let radius = (radius * factor).clamp(limits[0], limits[1]);
+            if radius <= 0.0 || !rect.expand(radius).contains(pos) {
+                continue;
+            }
+            // Edge-overlapping markers outside the viewport retain their exact geometry.
+            if sampling.is_none() || !rect.contains(pos) {
+                self.projected_point(point.into(), pos, depth, radius, shape, color, index);
+                continue;
+            }
+            let x = (((pos.x - rect.left()) / cell) as usize).min(columns - 1);
+            let y = (((pos.y - rect.top()) / cell) as usize).min(rows - 1);
+            let slot = &mut slots[y * columns + x];
+            let candidate = (index, pos, depth, radius, color);
+            if *slot == usize::MAX {
+                *slot = selected.len();
+                selected.push(candidate);
+            } else if depth < selected[*slot].2 {
+                selected[*slot] = candidate;
+            }
+        }
+        self.reserve(selected.len());
+        for (index, pos, depth, radius, color) in selected {
+            self.projected_point(
+                points[index].into(),
+                pos,
+                depth,
+                radius,
+                shape,
+                color,
+                index,
+            );
+        }
     }
     /// Submit a segment clipped to the camera and plot. Width is in logical pixels; index identifies its first sample.
     pub fn line(&mut self, a: PlotPoint, b: PlotPoint, width: f32, color: Color32, index: usize) {
@@ -212,33 +313,15 @@ impl PlotItemContext<'_> {
         if start.distance_sq(end) < 1e-12 {
             return;
         }
-        if let Some(pointer) = self.pointer.filter(|p| {
-            self.hover
-                && Rect::from_two_pos(start, end)
-                    .expand((width * 0.5 + 3.0).max(5.0))
-                    .contains(*p)
-        }) {
-            let delta = end - start;
-            let t = ((pointer - start).dot(delta) / delta.length_sq().max(1e-12)).clamp(0.0, 1.0);
-            let pos = start + delta * t;
-            // A dominant-axis ratio avoids overflowing dot products for distant
-            // endpoints. Clipping has already placed `pos` on the segment.
-            let dx = pb.0.x as f64 - pa.0.x as f64;
-            let dy = pb.0.y as f64 - pa.0.y as f64;
-            let s = if dx.abs() >= dy.abs() {
-                (pos.x as f64 - pa.0.x as f64) / dx
-            } else {
-                (pos.y as f64 - pa.0.y as f64) / dy
-            }
-            .clamp(0.0, 1.0) as f32;
-            let depth = if self.transform.camera.projection == crate::Projection::Perspective {
-                1.0 / ((1.0 - s) / pa.1 + s / pb.1)
-            } else {
-                pa.1 + (pb.1 - pa.1) * s
-            };
-            if let Some(point) = self.transform.point_from_position(pos, depth) {
-                self.pick(pos, depth, point, index, width * 0.5 + 3.0);
-            }
+        if self.hover && (self.pointer.is_some() || self.pick_scene.is_some()) {
+            self.record_pick(
+                crate::picking::PickShape::Segment {
+                    ends: [pa, pb],
+                    clipped: [start, end],
+                    radius: width * 0.5 + 3.0,
+                },
+                index,
+            );
         }
         self.push(
             pa.1 * 0.5 + pb.1 * 0.5,
@@ -284,9 +367,8 @@ impl PlotItemContext<'_> {
             Geometry::Triangle([b.0, b.0 - d + n, b.0 - d - n]),
         );
     }
-    /// Submit indexed triangles, projecting each shared vertex once.
-    /// Invalid faces are skipped. Missing face colors use the resolved item color.
-    /// Optional directional shading preserves opacity. Triangles are not pickable.
+    /// Submit indexed triangles with face colors and optional directional shading.
+    /// Picking reports the original face index and barycentric weights.
     pub fn indexed_triangles(
         &mut self,
         vertices: &[[f64; 3]],
@@ -294,13 +376,40 @@ impl PlotItemContext<'_> {
         colors: &[Color32],
         shading: bool,
     ) {
+        self.indexed_triangles_colored(vertices, indices, colors, shading, &[]);
+    }
+    /// Submit indexed triangles with optional smooth vertex colors. Nonempty vertex
+    /// colors override face colors; missing entries use the resolved item color.
+    pub fn indexed_triangles_colored(
+        &mut self,
+        vertices: &[[f64; 3]],
+        indices: &[[u32; 3]],
+        colors: &[Color32],
+        shading: bool,
+        vertex_colors: &[Color32],
+    ) {
         let projected: Vec<_> = vertices
             .iter()
             .map(|&p| self.transform.project(p.into()))
             .collect();
         self.reserve(indices.len());
-        for (face, &[a, b, c]) in indices.iter().enumerate() {
-            let [a, b, c] = [a as usize, b as usize, c as usize];
+        let shared =
+            !shading && !self.depth_cue && (colors.is_empty() || !vertex_colors.is_empty());
+        let base = self.vertices.len() as u32;
+        if shared {
+            self.vertices.extend(
+                projected
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| egui::epaint::Vertex {
+                        pos: p.map_or(Pos2::ZERO, |v| v.0),
+                        uv: SOLID_UV,
+                        color: vertex_colors.get(i).copied().unwrap_or(self.color),
+                    }),
+            );
+        }
+        for (face, &indices) in indices.iter().enumerate() {
+            let [a, b, c] = indices.map(|i| i as usize);
             if a >= vertices.len()
                 || b >= vertices.len()
                 || c >= vertices.len()
@@ -311,10 +420,15 @@ impl PlotItemContext<'_> {
                 continue;
             }
             let points = [vertices[a], vertices[b], vertices[c]];
-            let mut color = colors.get(face).copied().unwrap_or(self.color);
+            let mut colors = if vertex_colors.is_empty() {
+                [colors.get(face).copied().unwrap_or(self.color); 3]
+            } else {
+                [a, b, c].map(|i| vertex_colors.get(i).copied().unwrap_or(self.color))
+            };
             if shading {
-                let u: [f64; 3] = std::array::from_fn(|i| points[1][i] - points[0][i]);
-                let v: [f64; 3] = std::array::from_fn(|i| points[2][i] - points[0][i]);
+                // Normals are computed after axis scaling, so exaggeration changes lighting.
+                let u = self.transform.scaled_direction(points[0], points[1]);
+                let v = self.transform.scaled_direction(points[0], points[2]);
                 let n = [
                     u[1] * v[2] - u[2] * v[1],
                     u[2] * v[0] - u[0] * v[2],
@@ -323,29 +437,83 @@ impl PlotItemContext<'_> {
                 let length = n[0].hypot(n[1]).hypot(n[2]);
                 if length.is_finite() && length > 0.0 {
                     let light = ((n[0] * 0.36 - n[1] * 0.48 + n[2] * 0.8) / length).abs();
-                    let shaded = color.gamma_multiply((0.35 + 0.65 * light) as f32);
-                    color = Color32::from_rgba_premultiplied(
-                        shaded.r(),
-                        shaded.g(),
-                        shaded.b(),
-                        color.a(),
-                    );
+                    colors = colors.map(|c| shade(c, (0.35 + 0.65 * light) as f32));
                 }
             }
             if let [Some(a), Some(b), Some(c)] = [projected[a], projected[b], projected[c]] {
-                self.push(
-                    a.1 / 3.0 + b.1 / 3.0 + c.1 / 3.0,
-                    color,
-                    Geometry::Triangle([a.0, b.0, c.0]),
-                );
+                if shared {
+                    if Rect::from_points(&[a.0, b.0, c.0]).intersects(self.transform.rect) {
+                        if self.hover && (self.pointer.is_some() || self.pick_scene.is_some()) {
+                            self.record_pick(
+                                crate::picking::PickShape::Triangle {
+                                    vertices: [a, b, c],
+                                    weights: IDENTITY_WEIGHTS,
+                                },
+                                face,
+                            );
+                        }
+                        self.push(
+                            a.1 / 3.0 + b.1 / 3.0 + c.1 / 3.0,
+                            colors[0],
+                            Geometry::IndexedTriangle(indices.map(|i| base + i)),
+                        );
+                    }
+                } else {
+                    self.projected_triangle([a, b, c], colors, IDENTITY_WEIGHTS, face);
+                }
             } else {
-                // Crossing the near plane still needs full triangle clipping.
-                self.triangle(points.map(Into::into), color);
+                self.triangle_colored(points.map(Into::into), colors, face);
             }
         }
     }
-    /// Submit a filled world-space triangle, clipped at the near plane. Triangles currently do not participate in picking.
+    fn projected_triangle(
+        &mut self,
+        vertices: [(Pos2, f32); 3],
+        colors: [Color32; 3],
+        weights: [[f64; 3]; 3],
+        index: usize,
+    ) {
+        let points = vertices.map(|v| v.0);
+        if !Rect::from_points(&points).intersects(self.transform.rect) {
+            return;
+        }
+        if self.hover && (self.pointer.is_some() || self.pick_scene.is_some()) {
+            self.record_pick(
+                crate::picking::PickShape::Triangle { vertices, weights },
+                index,
+            );
+        }
+        let depth = vertices.iter().map(|v| v.1 / 3.0).sum();
+        if colors[0] == colors[1] && colors[1] == colors[2] {
+            self.push(depth, colors[0], Geometry::Triangle(points));
+        } else {
+            let colors = if self.depth_cue {
+                colors.map(|c| depth_color(c, depth))
+            } else {
+                colors
+            };
+            let base = self.vertices.len() as u32;
+            self.vertices.extend((0..3).map(|i| egui::epaint::Vertex {
+                pos: points[i],
+                uv: SOLID_UV,
+                color: colors[i],
+            }));
+            // Vertex colors already include the depth cue.
+            self.primitives.push(Primitive {
+                depth,
+                color: colors[0],
+                geometry: Geometry::IndexedTriangle([base, base + 1, base + 2]),
+            });
+        }
+    }
+    /// Submit a filled triangle. Picking returns index zero; use
+    /// [`Self::triangle_colored`] to supply an application index.
     pub fn triangle(&mut self, points: [PlotPoint; 3], color: Color32) {
+        self.triangle_colored(points, [color; 3], 0);
+    }
+    /// Submit a filled triangle with vertex colors and a pick index. Clipping
+    /// preserves interpolated colors and barycentric weights of the original face.
+    pub fn triangle_colored(&mut self, points: [PlotPoint; 3], colors: [Color32; 3], index: usize) {
         if points.iter().any(|p| !p.is_finite()) {
             return;
         }
@@ -353,34 +521,40 @@ impl PlotItemContext<'_> {
         if input.iter().flatten().any(|v| !v.is_finite()) {
             return;
         }
-        // Clip against the camera near plane before perspective division.
-        // A triangle can become a quad, but never needs a heap allocation.
-        let mut clipped = [[0.0; 3]; 4];
+        let mut clipped = [([0.0; 3], Color32::TRANSPARENT, [0.0; 3]); 4];
         let mut len = 0;
-        let mut previous = input[2];
-        for current in input {
-            if (previous[2] >= 0.05) != (current[2] >= 0.05) {
-                let t = (0.05 - previous[2]) / (current[2] - previous[2]);
-                clipped[len] =
-                    std::array::from_fn(|i| previous[i] + t * (current[i] - previous[i]));
-                clipped[len][2] = 0.05;
+        let mut previous = (input[2], colors[2], IDENTITY_WEIGHTS[2]);
+        for i in 0..3 {
+            let current = (input[i], colors[i], IDENTITY_WEIGHTS[i]);
+            if (previous.0[2] >= 0.05) != (current.0[2] >= 0.05) {
+                let t = (0.05 - previous.0[2]) / (current.0[2] - previous.0[2]);
+                let mut v =
+                    std::array::from_fn(|j| previous.0[j] + t * (current.0[j] - previous.0[j]));
+                v[2] = 0.05;
+                let a = previous.1.to_array();
+                let b = current.1.to_array();
+                let rgba: [u8; 4] = std::array::from_fn(|j| {
+                    (a[j] as f32 * (1.0 - t) + b[j] as f32 * t).round() as u8
+                });
+                clipped[len] = (
+                    v,
+                    Color32::from_rgba_premultiplied(rgba[0], rgba[1], rgba[2], rgba[3]),
+                    std::array::from_fn(|j| {
+                        previous.2[j] * (1.0 - t as f64) + current.2[j] * t as f64
+                    }),
+                );
                 len += 1;
             }
-            if current[2] >= 0.05 {
+            if current.0[2] >= 0.05 {
                 clipped[len] = current;
                 len += 1;
             }
             previous = current;
         }
         for i in 1..len.saturating_sub(1) {
-            let projected =
-                [clipped[0], clipped[i], clipped[i + 1]].map(|v| self.transform.project_view(v));
-            if let [Some(a), Some(b), Some(c)] = projected {
-                self.push(
-                    a.1 / 3.0 + b.1 / 3.0 + c.1 / 3.0,
-                    color,
-                    Geometry::Triangle([a.0, b.0, c.0]),
-                );
+            let face = [clipped[0], clipped[i], clipped[i + 1]];
+            if let [Some(a), Some(b), Some(c)] = face.map(|v| self.transform.project_view(v.0)) {
+                self.projected_triangle([a, b, c], face.map(|v| v.1), face.map(|v| v.2), index);
             }
         }
     }
@@ -392,6 +566,15 @@ impl PlotItemContext<'_> {
             self.push(depth, color, Geometry::Text(pos, text));
         }
     }
+}
+
+const IDENTITY_WEIGHTS: [[f64; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+fn shade(color: Color32, factor: f32) -> Color32 {
+    let shaded = color.gamma_multiply_u8((factor.clamp(0.0, 1.0) * 255.0).round() as u8);
+    Color32::from_rgba_premultiplied(shaded.r(), shaded.g(), shaded.b(), color.a())
+}
+fn depth_color(color: Color32, depth: f32) -> Color32 {
+    shade(color, (1.3 - depth * 0.09).clamp(0.45, 1.0))
 }
 
 /// Clip in f64 using the original line equation. Computing `a + t * (b - a)`
@@ -451,6 +634,10 @@ pub(crate) fn paint(painter: &Painter, scratch: &mut RenderScratch) -> usize {
 
 fn paint_sorted(painter: &Painter, scratch: &mut RenderScratch) -> usize {
     let count = scratch.primitives.len();
+    scratch.count = count;
+    scratch.shapes.clear();
+    scratch.vertex_map.resize(scratch.vertices.len(), u32::MAX);
+    scratch.vertex_map.fill(u32::MAX);
     let mut atlas = Atlas::load(painter.ctx());
     let mut previous_meshes = std::mem::take(&mut scratch.meshes);
     let mut mesh = reuse_mesh(&mut previous_meshes, atlas.texture.id());
@@ -479,11 +666,13 @@ fn paint_sorted(painter: &Painter, scratch: &mut RenderScratch) -> usize {
                 }
             }
             Geometry::Triangle(_) => (3, 3),
+            Geometry::IndexedTriangle(_) => (0, 3),
             Geometry::Text(..) => (0, 0),
         };
         (v + dv, i + di)
     });
-    mesh.vertices.reserve_exact(vertices);
+    mesh.vertices
+        .reserve_exact(vertices + scratch.vertices.len());
     mesh.indices.reserve_exact(indices);
     for &key in &scratch.keys {
         let p = &scratch.primitives[key as u32 as usize];
@@ -495,6 +684,17 @@ fn paint_sorted(painter: &Painter, scratch: &mut RenderScratch) -> usize {
                 segment_mesh(&mut mesh, *a, *b, *width, p.color, atlas.line_uv(*width))
             }
             Geometry::Triangle(v) => triangle_mesh(&mut mesh, *v, p.color),
+            Geometry::IndexedTriangle(indices) => {
+                let indices = indices.map(|i| {
+                    let target = &mut scratch.vertex_map[i as usize];
+                    if *target == u32::MAX {
+                        *target = mesh.vertices.len() as u32;
+                        mesh.vertices.push(scratch.vertices[i as usize]);
+                    }
+                    *target
+                });
+                mesh.indices.extend_from_slice(&indices);
+            }
             Geometry::Text(pos, text) => {
                 if !mesh.is_empty() {
                     submit_mesh(
@@ -504,22 +704,23 @@ fn paint_sorted(painter: &Painter, scratch: &mut RenderScratch) -> usize {
                             reuse_mesh(&mut previous_meshes, atlas.texture.id()),
                         ),
                         &mut scratch.meshes,
+                        &mut scratch.shapes,
                     );
+                    scratch.vertex_map.fill(u32::MAX);
                 }
-                painter.text(
-                    *pos,
-                    Align2::CENTER_CENTER,
-                    text,
-                    FontId::proportional(13.0),
-                    p.color,
-                );
+                let galley =
+                    painter.layout_no_wrap(text.clone(), FontId::proportional(13.0), p.color);
+                let shape = Shape::galley(*pos - galley.size() * 0.5, galley, p.color);
+                painter.add(shape.clone());
+                scratch.shapes.push(shape);
             }
         }
     }
     if !mesh.is_empty() {
-        submit_mesh(painter, mesh, &mut scratch.meshes);
+        submit_mesh(painter, mesh, &mut scratch.meshes, &mut scratch.shapes);
     }
     scratch.primitives.clear();
+    scratch.vertices.clear();
     atlas.store(painter.ctx());
     count
 }
@@ -536,9 +737,10 @@ fn reuse_mesh(pool: &mut Vec<Arc<Mesh>>, texture: egui::TextureId) -> Mesh {
     mesh.texture_id = texture;
     mesh
 }
-fn submit_mesh(painter: &Painter, mesh: Mesh, keep: &mut Vec<Arc<Mesh>>) {
+fn submit_mesh(painter: &Painter, mesh: Mesh, keep: &mut Vec<Arc<Mesh>>, shapes: &mut Vec<Shape>) {
     let mesh = Arc::new(mesh);
     painter.add(Shape::Mesh(mesh.clone()));
+    shapes.push(Shape::Mesh(mesh.clone()));
     keep.push(mesh);
 }
 
@@ -743,14 +945,24 @@ pub(crate) fn guides(
         }
     };
     if grid {
+        let floor: Vec<_> = (0..3)
+            .filter(|&axis| axis != transform.up_axis().index())
+            .collect();
         for i in 0..=8 {
             let t = i as f64 / 8.0;
-            let x = min[0] * (1.0 - t) + max[0] * t;
-            let y = min[1] * (1.0 - t) + max[1] * t;
-            draw([x, min[1], min[2]], [x, max[1], min[2]], weak);
-            draw([min[0], y, min[2]], [max[0], y, min[2]], weak);
+            for axis in 0..2 {
+                let mut a = min;
+                let mut b = min;
+                let along = floor[axis];
+                let across = floor[1 - axis];
+                a[along] = min[along] * (1.0 - t) + max[along] * t;
+                b[along] = a[along];
+                b[across] = max[across];
+                draw(a, b, weak);
+            }
         }
     }
+
     if frame {
         for axis in 0..3 {
             for i in 0..4 {
@@ -893,6 +1105,9 @@ mod tests {
                 color,
                 hover: false,
                 depth_cue: true,
+                pick_scene: None,
+                pick_item: 0,
+                vertices: &mut Vec::new(),
             };
             context.point([0.0; 3].into(), 3.0, MarkerShape::Circle, color, 0);
             assert_eq!(primitives[0].color.a(), color.a());
@@ -946,6 +1161,9 @@ mod tests {
                             color: Color32::LIGHT_BLUE,
                             hover: false,
                             depth_cue: true,
+                            pick_scene: None,
+                            pick_item: 0,
+                            vertices: &mut Vec::new(),
                         };
                         ctx.reserve(points.len());
                         if lines {
@@ -1064,6 +1282,9 @@ mod tests {
                 color: Color32::WHITE,
                 hover: false,
                 depth_cue: false,
+                pick_scene: None,
+                pick_item: 0,
+                vertices: &mut Vec::new(),
             };
             if shared {
                 context.polyline(&points, 1.5, Color32::WHITE);

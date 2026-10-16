@@ -1,6 +1,41 @@
 use crate::{PlotBounds, PlotPoint};
 use egui::{Pos2, Rect, Vec2, pos2, vec2};
 
+/// World axis displayed vertically. Coordinates and sample indices stay unchanged.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UpAxis {
+    /// X up, with Y/Z forming the floor.
+    X,
+    /// Y up, with X/Z forming the floor.
+    Y,
+    /// Z up, with X/Y forming the floor (default).
+    #[default]
+    Z,
+}
+impl UpAxis {
+    pub(crate) fn index(self) -> usize {
+        match self {
+            Self::X => 0,
+            Self::Y => 1,
+            Self::Z => 2,
+        }
+    }
+    fn orient(self, p: [f32; 3]) -> [f32; 3] {
+        match self {
+            Self::X => [p[1], p[2], p[0]],
+            Self::Y => [p[0], -p[2], p[1]],
+            Self::Z => p,
+        }
+    }
+    fn unorient(self, p: [f32; 3]) -> [f32; 3] {
+        match self {
+            Self::X => [p[2], p[0], p[1]],
+            Self::Y => [p[0], p[2], -p[1]],
+            Self::Z => p,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 /// Camera projection model.
 pub enum Projection {
@@ -48,6 +83,20 @@ impl Camera {
             self.zoom = (self.zoom * factor).clamp(0.02, 100.0);
         }
     }
+    /// Zoom while keeping the world ray under a logical screen position fixed.
+    /// `rect` is the plot frame; pan remains expressed in plot-size units.
+    pub fn zoom_at(&mut self, factor: f32, position: Pos2, rect: Rect) {
+        if !position.is_finite() || !rect.is_finite() || rect.width() <= 0.0 || rect.height() <= 0.0
+        {
+            return;
+        }
+        *self = self.sanitized();
+        let before = self.zoom;
+        self.zoom_by(factor);
+        let center = rect.center() + self.pan * rect.size();
+        let center = position + (center - position) * (self.zoom / before);
+        self.pan = (center - rect.center()) / rect.size();
+    }
     pub(crate) fn sanitized(mut self) -> Self {
         if !self.yaw.is_finite() {
             self.yaw = Self::default().yaw;
@@ -68,7 +117,7 @@ impl Camera {
 }
 
 /// The exact world-to-screen transform used for drawing and picking.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PlotTransform {
     pub(crate) rect: Rect,
     pub(crate) bounds: PlotBounds,
@@ -82,6 +131,7 @@ pub struct PlotTransform {
     cy: f32,
     sp: f32,
     cp: f32,
+    up_axis: UpAxis,
 }
 impl PlotTransform {
     /// Build a transform for a screen rectangle, fitted data bounds, and camera. Equal aspect preserves equal world units.
@@ -109,11 +159,21 @@ impl PlotTransform {
             cy,
             sp,
             cp,
+            up_axis: UpAxis::Z,
         }
     }
     /// Screen rectangle allocated to the plot, in logical pixels.
     pub fn frame(&self) -> Rect {
         self.rect
+    }
+    /// Choose the world axis displayed vertically without rewriting coordinates.
+    pub fn with_up_axis(mut self, axis: UpAxis) -> Self {
+        self.up_axis = axis;
+        self
+    }
+    /// World axis displayed vertically.
+    pub fn up_axis(&self) -> UpAxis {
+        self.up_axis
     }
     /// Relative lengths of world units on X, Y, and Z, before camera rotation.
     /// Invalid ratios leave the transform unchanged.
@@ -154,6 +214,7 @@ impl PlotTransform {
             };
             value as f32
         });
+        let v = self.up_axis.orient(v);
         let x = v[0] * self.cy - v[1] * self.sy;
         let y = v[0] * self.sy + v[1] * self.cy;
         [
@@ -161,6 +222,9 @@ impl PlotTransform {
             v[2] * self.cp - y * self.sp,
             4.0 - (y * self.cp + v[2] * self.sp),
         ]
+    }
+    pub(crate) fn scaled_direction(&self, a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+        std::array::from_fn(|i| (b[i] - a[i]) / self.extent[i])
     }
     pub(crate) fn project_view(&self, v: [f32; 3]) -> Option<(Pos2, f32)> {
         if !v.iter().all(|x| x.is_finite()) || v[2] < 0.05 {
@@ -211,6 +275,7 @@ impl PlotTransform {
         let y = forward * self.cp - up * self.sp;
         let z = forward * self.sp + up * self.cp;
         let v = [x * self.cy + y * self.sy, -x * self.sy + y * self.cy, z];
+        let v = self.up_axis.unorient(v);
         let point: PlotPoint = std::array::from_fn::<_, 3, _>(|i| {
             (v[i] as f64).mul_add(self.extent[i], self.center[i])
         })

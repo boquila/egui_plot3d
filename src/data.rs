@@ -44,6 +44,11 @@ impl From<[f64; 3]> for PlotPoint {
         Self::new(p[0], p[1], p[2])
     }
 }
+impl From<[f32; 3]> for PlotPoint {
+    fn from(p: [f32; 3]) -> Self {
+        Self::from(p.map(f64::from))
+    }
+}
 impl From<(f64, f64, f64)> for PlotPoint {
     fn from((x, y, z): (f64, f64, f64)) -> Self {
         Self::new(x, y, z)
@@ -196,6 +201,16 @@ pub struct PointBuffer {
     bounds: PlotBounds,
 }
 impl PointBuffer {
+    /// Collect coordinates from application records or f32 arrays once, caching bounds.
+    /// The input order is preserved for picking and parallel attribute columns.
+    pub fn from_points<P: Into<PlotPoint>>(points: impl IntoIterator<Item = P>) -> Self {
+        Self::new(
+            points
+                .into_iter()
+                .map(|p| p.into().to_array())
+                .collect::<Vec<_>>(),
+        )
+    }
     /// Share immutable coordinates and calculate finite bounds once. Accepts a vector, boxed slice, or `Arc<[[f64; 3]]>`.
     pub fn new(points: impl Into<Arc<[[f64; 3]]>>) -> Self {
         let points = points.into();

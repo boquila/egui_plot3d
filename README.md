@@ -11,11 +11,14 @@ Immediate mode 3D plotting library for [`egui`](https://github.com/emilk/egui), 
 
 [API examples](src/lib.rs) · [Gallery source](examples/demo/src)
 
+[Migration and performance guide](docs/migration.md) · [Selection and surface example](examples/demo/src/bin/explorer.rs)
+
 Not yet published to crates.io. Use a local path or Git dependency.
 
 ## Testing
 
 - Locally: `cargo run --release -p egui_plot3d_demo`
+- Data explorer: `cargo run --release -p egui_plot3d_demo --bin explorer`
 - Web: `cd examples/demo` then `trunk serve --release`
 - Tests: `cargo test --workspace`
 - Benchmarks: `cargo bench --bench render` or `cargo bench --bench workloads`

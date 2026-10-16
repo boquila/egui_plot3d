@@ -135,13 +135,15 @@ macro_rules! trait_style {
 ///
 /// Indices address the supplied vertices. Invalid indices and non-finite faces
 /// are skipped; bounds include all supplied vertices. Face colors are optional.
-/// Surfaces use average-depth sorting and currently do not participate in picking.
+/// Surfaces use average-depth sorting. Picking returns the original face index
+/// and barycentric weights for interpolating application-owned attributes.
 pub struct Surface<'a> {
     style: Style,
     vertices: PlotPoints<'a>,
     indices: PlotValues<'a, [u32; 3]>,
     colors: PlotValues<'a, Color32>,
     shading: bool,
+    vertex_colors: PlotValues<'a, Color32>,
 }
 impl<'a> Surface<'a> {
     /// Create a surface from vertices and triangle index triplets.
@@ -156,12 +158,20 @@ impl<'a> Surface<'a> {
             indices: indices.into(),
             colors: PlotValues::default(),
             shading: false,
+            vertex_colors: PlotValues::default(),
         }
     }
     style_methods!();
     /// Per-triangle colors in index order. Missing colors use the item's color.
     pub fn colors(mut self, colors: impl Into<PlotValues<'a, Color32>>) -> Self {
         self.colors = colors.into();
+        self
+    }
+    /// Smooth per-vertex colors, interpolated across each triangle. When present,
+    /// these override face colors; missing entries use the resolved item color.
+    /// Colors are interpolated in screen space by egui's mesh renderer.
+    pub fn vertex_colors(mut self, colors: impl Into<PlotValues<'a, Color32>>) -> Self {
+        self.vertex_colors = colors.into();
         self
     }
     /// Map a scalar at each vertex, averaging scalars per face before applying
@@ -200,11 +210,12 @@ impl PlotItem for Surface<'_> {
         self.vertices.bounds()
     }
     fn render(&self, context: &mut PlotItemContext<'_>) {
-        context.indexed_triangles(
+        context.indexed_triangles_colored(
             self.vertices.as_slice(),
             self.indices.as_slice(),
             self.colors.as_slice(),
             self.shading,
+            self.vertex_colors.as_slice(),
         );
     }
 }
@@ -217,6 +228,9 @@ pub struct Points<'a> {
     shape: MarkerShape,
     colors: PlotValues<'a, Color32>,
     radii: PlotValues<'a, f32>,
+    sampling: Option<f32>,
+    perspective_scaling: bool,
+    radius_limits: [f32; 2],
 }
 impl<'a> Points<'a> {
     /// Create markers from owned, borrowed, or shared coordinates. The name supplies the initial stable item ID.
@@ -228,6 +242,9 @@ impl<'a> Points<'a> {
             shape: MarkerShape::Circle,
             colors: PlotValues::default(),
             radii: PlotValues::default(),
+            sampling: None,
+            perspective_scaling: false,
+            radius_limits: [0.0, 1000.0],
         }
     }
     style_methods!();
@@ -252,6 +269,30 @@ impl<'a> Points<'a> {
         self.radii = radii.into();
         self
     }
+    /// Keep the nearest point in each screen cell, reducing mesh size for dense
+    /// clouds. Opt-in and approximate: hidden representatives are neither drawn
+    /// nor picked. Returned indices still address the original samples.
+    /// Cell size is in logical pixels (minimum 1); the grid uses at most 1M cells.
+    /// Invalid sizes disable sampling. Full data still determines fitted bounds.
+    pub fn screen_space_sampling(mut self, cell_size: f32) -> Self {
+        self.sampling = (cell_size.is_finite() && cell_size > 0.0).then_some(cell_size.max(1.0));
+        self
+    }
+    /// Scale marker radii with perspective depth (default false). The configured
+    /// radius is the radius at the plot center. Orthographic views are unaffected.
+    pub fn perspective_scaling(mut self, enabled: bool) -> Self {
+        self.perspective_scaling = enabled;
+        self
+    }
+    /// Clamp visible marker radii after perspective scaling, in logical pixels.
+    /// Zero/non-finite input radii remain hidden. Invalid limits are ignored.
+    pub fn radius_limits(mut self, limits: std::ops::RangeInclusive<f32>) -> Self {
+        let (min, max) = (*limits.start(), *limits.end());
+        if min.is_finite() && max.is_finite() && min >= 0.0 && max >= min && max <= 1000.0 {
+            self.radius_limits = [min, max];
+        }
+        self
+    }
     /// Color points by a scalar computed from each position. Colors are owned.
     pub fn color_by(mut self, mut value: impl FnMut(PlotPoint) -> f64, scale: &ColorScale) -> Self {
         self.colors = scale
@@ -266,6 +307,27 @@ impl PlotItem for Points<'_> {
         self.series.bounds()
     }
     fn render(&self, context: &mut PlotItemContext<'_>) {
+        if self.sampling.is_some()
+            || self.perspective_scaling
+            || self.radius_limits != [0.0, 1000.0]
+        {
+            let fallback = context.color();
+            context.point_cloud(
+                self.series.as_slice(),
+                self.shape,
+                self.sampling,
+                self.perspective_scaling,
+                self.radius_limits,
+                |i| {
+                    (
+                        self.radii.as_slice().get(i).copied().unwrap_or(self.radius)
+                            * self.style.scale(),
+                        self.colors.as_slice().get(i).copied().unwrap_or(fallback),
+                    )
+                },
+            );
+            return;
+        }
         context.reserve(self.series.len());
         for (i, &p) in self.series.as_slice().iter().enumerate() {
             let radius = self.radii.as_slice().get(i).copied().unwrap_or(self.radius);
@@ -455,7 +517,11 @@ impl PlotItem for Polygon<'_> {
     fn render(&self, ctx: &mut PlotItemContext<'_>) {
         let p = self.series.as_slice();
         for i in 1..p.len().saturating_sub(1) {
-            ctx.triangle([p[0].into(), p[i].into(), p[i + 1].into()], ctx.color());
+            ctx.triangle_colored(
+                [p[0].into(), p[i].into(), p[i + 1].into()],
+                [ctx.color(); 3],
+                i - 1,
+            );
         }
     }
 }

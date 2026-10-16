@@ -13,7 +13,8 @@
 //!
 //! Drag to orbit, secondary-drag or shift-drag to pan, scroll to zoom,
 //! and double-click to fit. State is stored in egui under the plot's ID.
-//! Coordinates are right-handed with Z up. No renderer setup is required:
+//! Coordinates are right-handed with Z up by default; [`Plot::up_axis`] also
+//! supports X-up and Y-up data without changing coordinates. No renderer setup is required:
 //! plots use batched egui meshes and work with both glow and wgpu.
 //!
 //! # Function plots
@@ -91,14 +92,49 @@
 //! domains, and explicit missing colors. Set [`Plot::depth_cue`] to false when
 //! surface or point colors must retain an exact quantitative meaning.
 //!
+//! # Interaction and large datasets
+//!
+//! [`HoveredPoint::index`] refers to the original input point, segment start,
+//! or surface face. Surface hits include [`HoveredPoint::barycentric`] weights
+//! for interpolating arbitrary vertex attributes. [`Surface::vertex_colors`]
+//! accepts smooth per-vertex colors without changing the original topology.
+//!
+//! ```
+//! use egui_plot3d::{Plot, PointBuffer, Points, UpAxis};
+//! let records = [[1.0_f32, 2.0, 3.0], [2.0, 3.0, 4.0]];
+//! let data = PointBuffer::from_points(records); // Convert and bound once.
+//! let data_revision = 1_u64;
+//! # egui::__run_test_ui(|ui| {
+//! let response = Plot::new("explorer")
+//!     .up_axis(UpAxis::Y)
+//!     .zoom_to_pointer(true)
+//!     .cache_revision(data_revision)
+//!     .show(ui, |plot| plot.points(Points::new("Samples", &data)));
+//! if let Some(hit) = response.clicked_point {
+//!     let selected_record = records[hit.index];
+//! }
+//! # });
+//! ```
+//!
+//! [`Plot::cache_revision`] reuses meshes and a spatial picking index. Advance
+//! the revision when geometry or item attributes change; camera/viewport changes
+//! invalidate automatically. [`Plot::capture_picking`] returns a [`PlotPicking`]
+//! snapshot for custom hit tests and surface-occluded annotations.
+//! [`Points::screen_space_sampling`] optionally keeps the nearest representative
+//! per screen cell. It reduces mesh size at the cost of omitting other samples
+//! from drawing and picking; it is never enabled implicitly.
+//!
 //! # Rendering limits
 //!
 //! Projection and depth sorting run on the CPU. Points are depth-sorted;
 //! segments and triangles use average depth, so intersecting geometry is not
 //! guaranteed to have correct per-pixel occlusion. There is no depth buffer.
-//! Picking currently covers points and line/arrow shafts, not filled polygons
-//! or text. World coordinates are `f64`; normalized camera/screen coordinates
+//! Picking covers points, line/arrow shafts, surfaces and filled convex polygons;
+//! text and arrowheads are excluded. World coordinates are `f64`; normalized camera/screen coordinates
 //! use `f32`, matching egui's mesh representation.
+//! Vertex colors interpolate in screen space. Picking uses perspective-correct
+//! world interpolation, but average-depth painting can disagree at intersecting
+//! faces. Cached frames still incur egui tessellation and backend upload costs.
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
@@ -108,16 +144,18 @@ mod colormaps;
 mod data;
 mod grid;
 mod items;
+mod picking;
 mod plot;
 mod render;
 mod texture;
 mod values;
 
-pub use camera::{Camera, PlotTransform, Projection};
+pub use camera::{Camera, PlotTransform, Projection, UpAxis};
 pub use color::{ColorBar, ColorMap, ColorScale};
 pub use data::{PlotBounds, PlotPoint, PlotPoints, PointBuffer};
 pub use grid::SurfaceGrid;
 pub use items::{Arrows, Line, MarkerShape, PlotItem, Points, Polygon, Surface, Text};
+pub use picking::PlotPicking;
 pub use plot::{Corner, HoveredPoint, Legend, Plot, PlotResponse, PlotUi};
 pub use render::PlotItemContext;
 pub use values::PlotValues;
