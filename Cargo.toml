@@ -6,6 +6,8 @@ rust-version = "1.95"
 description = "Immediate mode 3D plots for egui"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/boquila/egui_plot3d"
+homepage = "https://boquila.org/egui_plot3d/"
+documentation = "https://docs.rs/egui_plot3d"
 readme = "README.md"
 include = ["/src/**", "/tests/**", "/examples/benches/**", "/Cargo.toml", "/README.md", "/LICENSE-*"]
 

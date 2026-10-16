@@ -7,9 +7,9 @@
 
 Immediate mode 3D plotting library for [`egui`](https://github.com/emilk/egui), with an API inspired by [`egui_plot`](https://github.com/emilk/egui_plot).
 
-![Animated wave interference, spherical harmonics, and torus knots](assets/egui_plot3d.gif)
+![Animated wave interference, spherical harmonics, and torus knots](https://raw.githubusercontent.com/boquila/egui_plot3d/main/assets/egui_plot3d.gif)
 
-[API examples](src/lib.rs) · [Gallery source](examples/demo/src)
+[Live demo](https://boquila.org/egui_plot3d/) · [API examples](https://github.com/boquila/egui_plot3d/blob/main/src/lib.rs) · [Gallery source](https://github.com/boquila/egui_plot3d/tree/main/examples/demo/src)
 
 ## Testing
 
