@@ -11,8 +11,6 @@ Immediate mode 3D plotting library for [`egui`](https://github.com/emilk/egui), 
 
 [API examples](src/lib.rs) · [Gallery source](examples/demo/src)
 
-Not yet published to crates.io. Use a local path or Git dependency.
-
 ## Testing
 
 - Locally: `cargo run --release -p egui_plot3d_demo`
@@ -21,5 +19,4 @@ Not yet published to crates.io. Use a local path or Git dependency.
 - Tests: `cargo test --workspace`
 - Benchmarks: `cargo bench --bench render` or `cargo bench --bench workloads`
 - Documentation: `cargo doc --no-deps --open`
-
-The web demo requires [Trunk](https://trunkrs.dev/) and the `wasm32-unknown-unknown` Rust target.
+- As a library: point the repo at your clanker
