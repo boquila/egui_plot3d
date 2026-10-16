@@ -11,8 +11,6 @@ Immediate mode 3D plotting library for [`egui`](https://github.com/emilk/egui), 
 
 [API examples](src/lib.rs) · [Gallery source](examples/demo/src)
 
-[Migration and performance guide](docs/migration.md) · [Selection and surface example](examples/demo/src/bin/explorer.rs)
-
 Not yet published to crates.io. Use a local path or Git dependency.
 
 ## Testing
@@ -25,11 +23,3 @@ Not yet published to crates.io. Use a local path or Git dependency.
 - Documentation: `cargo doc --no-deps --open`
 
 The web demo requires [Trunk](https://trunkrs.dev/) and the `wasm32-unknown-unknown` Rust target.
-
-## Plotting libraries in Rust
-
-See egui_plot's [notes on the Rust plotting ecosystem](https://github.com/emilk/egui_plot/blob/main/ECOSYSTEM.md).
-
-## Contributing
-
-[Issues](https://github.com/boquila/egui_plot3d/issues) and [pull requests](https://github.com/boquila/egui_plot3d/pulls) are welcome.
