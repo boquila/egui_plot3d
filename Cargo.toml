@@ -7,10 +7,10 @@ description = "Immediate mode 3D plots for egui"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/boquila/egui_plot3d"
 readme = "README.md"
-include = ["src/**", "tests/**", "benches/**", "Cargo.toml", "README.md", "LICENSE-*"]
+include = ["/src/**", "/tests/**", "/examples/benches/**", "/Cargo.toml", "/README.md", "/LICENSE-*"]
 
 [workspace]
-members = ["demo"]
+members = ["examples/demo"]
 resolver = "2"
 
 [dependencies]
@@ -21,10 +21,12 @@ egui = { version = "0.36.2", features = ["default_fonts"] }
 
 [[bench]]
 name = "render"
+path = "examples/benches/render.rs"
 harness = false
 
 [[bench]]
 name = "workloads"
+path = "examples/benches/workloads.rs"
 harness = false
 
 [profile.release]

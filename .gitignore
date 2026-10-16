@@ -1,7 +1,7 @@
 /target
 /ref
-/demo/dist
-/demo/dist-pages
+/examples/demo/dist
+/examples/demo/dist-pages
 /tools
 /artifacts
 /node_modules

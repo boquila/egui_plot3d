@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-egui_plot3d = { path = ".." }
+egui_plot3d = { path = "../.." }
 eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
 egui_extras = { version = "0.36.2", default-features = false, features = ["syntect"] }
 
